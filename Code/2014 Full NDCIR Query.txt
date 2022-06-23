@@ -1,0 +1,1309 @@
+create volatile table emh_nccir_date_range as
+ (select *
+from ntl_prd_qmtbls.month_date_emh_v 
+where Date_Range = '?first_of_Mnth'
+) with data
+primary index(month_range, date_range) 
+index(date_range) order by values(date_range)
+on commit preserve rows;
+
+
+/*create volatile table stm_nccir_rmonth
+AS (select
+	case
+	when extract(day from calendar_date) between 1 and 7
+		then add_months(calendar_date - (extract(day from calendar_date)-1),-1)
+	else add_months(calendar_date - (extract(day from calendar_date)-1),-1)
+	end as rmonth
+from sys_calendar.calendar
+where calendar_date=date
+ )with data
+primary index (rmonth)  on commit preserve rows;  */
+
+create volatile table nccir_base1
+as
+(
+	select 
+		'NC' as activity_type
+		,(dla.activity_dt - (extract(day from dla.activity_dt)-1)) as activity_mth
+		,dla.activity_dt
+		,mh.area_desc
+		,mh.region_desc
+		,dla.sor_id
+		,dla.cust_id
+		,dla.cust_line_seq_id
+		,dla.acct_num
+		,dla.mtn
+		,dla.sls_outlet_id
+		,dla.sls_prsn_id
+		,coalesce(caldh.device_prod_nm,dla.prod_nm) as prod_nm
+		,dla.esn_num
+		,'NA' as prod_nm_prev
+		,coalesce(pos.fulfillment_ind,'L') as fulfillment_ind
+		,dea.eroes_user_id
+		,dla.user_id
+		,pos.acss_user_id
+		,pos.netace_user_id
+
+from ntl_prd_allvm.dly_line_activity_v dla
+	
+	join ntl_prd_allvm.cust_acct_line_dly_hist_v caldh
+		on dla.sor_id=caldh.sor_id
+		and dla.cust_id=caldh.cust_id
+		and dla.cust_line_seq_id=caldh.cust_line_seq_id
+		and dla.activity_dt between caldh.eff_dt and caldh.exp_dt
+		
+	join ntl_prd_allvm.market_hist_v mh
+		on caldh.sor_id=mh.sor_id
+		and caldh.mkt_cd=mh.mkt_cd
+		and dla.activity_dt between mh.eff_dt and coalesce(mh.exp_dt,current_date)
+		
+	left join ntl_prd_allvm.pos_trans_v pos
+	on dla.sor_id = pos.sor_id
+	and dla.cust_id = pos.cust_id
+	and dla.cust_line_seq_id = pos.cust_line_seq_id
+	and pos.esn_num is not null
+	and pos.sold_qty > 0
+	and pos.sls_type='P'
+	
+	left join (select 
+	sor_id
+	,cust_id
+	,cust_line_seq_id
+	,trans_dt
+	,eroes_user_id
+
+from ntl_prd_allvm.dly_eroes_activity_v
+
+where trans_type_cd='AC'
+qualify row_number() over (partition by cust_id, cust_line_seq_id order by cust_id, cust_line_seq_id) =1) dea
+		on dla.sor_id=dea.sor_id
+		and dla.cust_id=dea.cust_id
+		and dla.cust_line_seq_id=dea.cust_line_seq_id
+		and dea.trans_dt between dla.activity_dt - 30 and dla.activity_dt + 30
+
+	
+where
+	dla.sor_id='V'
+	and dla.activity_cd='AC'
+	and coalesce(dla.churn_ind,'Y') = 'Y'
+	and  dla.activity_dt between '?start_dt'and '?end_dt'
+	and coalesce(caldh.prepaid_ind,'N') = 'N'
+	and coalesce(caldh.rev_gen_ind,'Y')='Y'
+	and mh.managed_ind in ('C','D')
+	
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(activity_dt)
+on commit preserve rows;
+
+create volatile table nccir_base1a
+as
+(
+select  
+base1.cust_id
+,base1.cust_line_seq_id
+,base1.activity_dt
+,base1.sls_prsn_id
+,base1.user_id
+,sp.emp_id as emp_id_from_sp
+,he.emp_id as emp_id_from_userid_he
+,c.emp_id as emp_id_from_userid_c
+,he2.emp_id as emp_id_from_netace_user_id_he
+,c2.emp_id as emp_id_from_netace_user_id_c
+,he3.emp_id as emp_id_from_eroes_user_id_he
+,c3.emp_id as emp_id_from_eroes_user_id_c
+,au.hr_employee_id as emp_id_from_acss_user_id
+
+from nccir_base1 base1
+
+left join ntl_prd_allvm.sales_person_v sp
+		on base1.sor_id=sp.sor_id
+		and base1.sls_prsn_id=sp.sls_prsn_id
+		
+left join ntl_prd_allvm.hr_employee_hist_v he
+	on base1.user_id=he.nt_user_id
+	and base1.activity_dt between he.eff_dt and he.exp_dt
+	
+left join ntl_prd_allvm.contractor_hist_v c
+	on base1.user_id=c.nt_user_id
+	and base1.activity_dt between c.eff_dt and c.exp_dt
+	
+left join ntl_prd_allvm.hr_employee_hist_v he2
+	on base1.netace_user_id=he2.nt_user_id
+	and base1.activity_dt between he2.eff_dt and he2.exp_dt
+
+left join ntl_prd_allvm.contractor_hist_v c2
+	on base1.netace_user_id=c2.nt_user_id
+	and base1.activity_dt between c2.eff_dt and c2.exp_dt
+	
+left join ntl_prd_allvm.hr_employee_hist_v he3
+	on base1.eroes_user_id=he3.nt_user_id
+	and base1.activity_dt between he3.eff_dt and he3.exp_dt
+	
+left join ntl_prd_allvm.contractor_hist_v c3
+	on base1.eroes_user_id=c3.nt_user_id
+	and base1.activity_dt between c3.eff_dt and c3.exp_dt
+	
+left join ntl_prd_allvm.acss_user_v au
+	on base1.acss_user_id=au.acss_user_id
+
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(activity_dt)
+on commit preserve rows;
+
+create volatile table nccir_base1b
+as
+(
+select 
+base1a.cust_id
+,base1a.cust_line_seq_id
+,base1a.activity_dt
+	,case when base1a.sls_prsn_id is not null and base1a.sls_prsn_id <> 'ENC' then 
+			case when (base1a.emp_id_from_sp is null or base1a.emp_id_from_sp='999999') then coalesce(base1a.emp_id_from_userid_he,base1a.emp_id_from_userid_c,base1a.emp_id_from_netace_user_id_he, base1a.emp_id_from_netace_user_id_c, base1a.emp_id_from_eroes_user_id_he, base1a.emp_id_from_eroes_user_id_c, base1a.emp_id_from_acss_user_id, 'SP_TBD') 
+						else base1a.emp_id_from_sp end 
+		when base1a.sls_prsn_id ='ENC' then coalesce(base1a.emp_id_from_userid_he,base1a.emp_id_from_userid_c,base1a.emp_id_from_netace_user_id_he, base1a.emp_id_from_netace_user_id_c, base1a.emp_id_from_eroes_user_id_he, base1a.emp_id_from_eroes_user_id_c, base1a.emp_id_from_acss_user_id, 'SP_TBD')
+		when base1a.sls_prsn_id is null then 
+			case when base1a.user_id <> 'POSEMP' then coalesce(base1a.emp_id_from_userid_he,base1a.emp_id_from_userid_c,base1a.emp_id_from_netace_user_id_he, base1a.emp_id_from_netace_user_id_c, base1a.emp_id_from_eroes_user_id_he, base1a.emp_id_from_eroes_user_id_c, base1a.emp_id_from_acss_user_id, 'SP_TBD') 
+			 when base1a.user_id='POSEMP' then coalesce(base1a.emp_id_from_netace_user_id_he, base1a.emp_id_from_netace_user_id_c, base1a.emp_id_from_eroes_user_id_he, base1a.emp_id_from_eroes_user_id_c, base1a.emp_id_from_acss_user_id, 'SP_TBD')  end 
+	else 'still not found' end as hr_employee_id
+	,coalesce(he.nt_user_id,c.nt_user_id,'-') as nt_user_id
+
+from nccir_base1a base1a
+
+left join ntl_prd_allvm.hr_employee_v he
+	on hr_employee_id=he.emp_id
+
+left join ntl_prd_allvm.contractor_v c
+	on hr_employee_id=c.emp_id
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(activity_dt)
+on commit preserve rows;
+
+create volatile table nccir_acts
+as
+(
+select 
+	base1.activity_type
+	,base1.activity_mth
+	,base1.activity_dt
+	,base1.area_desc
+	,base1.region_desc
+	,base1.sor_id
+	,base1.cust_id
+	,base1.cust_line_seq_id
+	,base1.acct_num
+	,base1.mtn
+	,base1.sls_outlet_id
+	,base1.sls_prsn_id
+	,base1.prod_nm
+	,base1.esn_num
+	,base1.prod_nm_prev
+	,case when (sls.sls_dist_chnl_churn_ctgry in ('Internet','Indirect Internet') and base1.fulfillment_ind<>'F') then 'F' else base1.fulfillment_ind end as fulfillement_ind
+	,sls.sls_dist_chnl_churn_ctgry
+	,base1b.hr_employee_id
+	,base1b.nt_user_id
+	,ml.addr_line1
+	,ml.city_nm
+	,ml.state_cd
+	,ml.zip5_cd
+	,m.area_desc as sls_area_desc
+	,m.region_desc as sls_region_desc
+	,ecpd.ecpd_profile_id
+	,ecpd.ecpd_liability_type_cd
+	,cadh.lang_pref_ind
+
+from nccir_base1 base1
+	
+	join nccir_base1b base1b
+		on base1.activity_dt=base1b.activity_dt
+		and base1.cust_id=base1b.cust_id
+		and base1.cust_line_seq_id=base1b.cust_line_seq_id
+				
+	left join ntl_prd_allvm.outlet_v o
+		on base1.sor_id = o.sor_id
+		and base1.sls_outlet_id = o.sls_outlet_id
+		
+	left join ntl_prd_allvm.master_location_v ml
+		on o.master_loc_cd=ml.master_loc_cd
+	
+	left join ntl_prd_allvm.market_v m
+		on o.sls_outlet_mkt_cd=m.mkt_cd
+		and o.sor_id=m.sor_id
+		
+	left join ntl_prd_allvm.sales_dist_channel_type_v sls
+		on o.sor_id = sls.sor_id
+		and o.sls_dist_chnl_type_cd = sls.sls_dist_chnl_type_cd
+		
+	left join ntl_prd_allvm.cust_ecpd_v ecpd
+		on base1.sor_id=ecpd.sor_id
+		and base1.cust_id = ecpd.cust_id
+		and base1.activity_dt between ecpd.ecpd_eff_dt and coalesce(ecpd.ecpd_term_dt, current_date)
+		
+	left join ntl_prd_allvm.cust_acct_dly_hist_v cadh
+		on base1.sor_id=cadh.sor_id
+		and base1.cust_id=cadh.cust_id
+		and base1.acct_num=cadh.acct_num
+		and base1.activity_dt between cadh.eff_dt and coalesce(cadh.exp_dt, current_date)
+
+	qualify row_number() over (partition by base1.cust_id, base1.cust_line_seq_id order by base1.cust_id, base1.cust_line_seq_id, base1.activity_dt) =1
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;
+
+create volatile table nccir_calls
+as
+(
+select
+	a.activity_mth
+	,a.cust_id
+	,a.cust_line_seq_id
+	,a.activity_dt
+	,ac.acss_call_dt
+	,ac.acss_call_tm
+	,ac.acss_call_id
+	,ac.acd_call_id
+	,ac.ivr_call_id
+	,ac.acss_user_id
+	,ac.acss_call_ctr_cd
+	,acc.acss_call_ctr_type
+	,ac.acss_dept_id
+	,ac.call_start_tm
+	,ac.call_end_tm
+	,ac.call_end_tm - ac.call_start_tm day(4) to second(0) as call_duration
+	,ac.acss_call_dt - a.activity_dt as call_period
+	,ac.acss_call_type_cd
+	,'Y' as included_call
+	,case when acc.acss_call_ctr_type = 'v' and ac.acss_call_type_cd = '1' then 1 else 0 end as in_type1
+    ,case when acc.acss_call_ctr_type = 'v' and ac.acss_call_type_cd = '3' then 1 else 0 end as in_type3
+    ,case when acc.acss_call_ctr_type = 'v' and ac.acss_call_type_cd = '7' then 1 else 0 end as in_type7
+    ,case when acc.acss_call_ctr_type = 'v' and ac.acss_call_type_cd not in ('1','3','7') then 1 else 0 end as in_other_type
+    ,case when acc.acss_call_ctr_type = 'o' and ac.acss_call_type_cd = '1' then 1 else 0 end as os_type1
+    ,case when acc.acss_call_ctr_type = 'o' and ac.acss_call_type_cd = '3' and d.acss_dept_desc not like '%offline%' then 1 else 0 end as os_type3
+    ,case when acc.acss_call_ctr_type = 'o' and ac.acss_call_type_cd = '7' then 1 else 0 end as os_type7
+    ,case when acc.acss_call_ctr_type = 'o' and ac.acss_call_type_cd not in ('1','3','7') then 1 else 0 end as os_other_type
+	
+from nccir_acts a
+	 join ntl_prd_allvm.acss_call_v ac
+	on a.sor_id=ac.sor_id
+	and a.cust_id=ac.cust_id
+	and a.cust_line_seq_id=ac.cust_line_seq_id
+	and ac.acss_call_dt between a.activity_dt and a.activity_dt + 31
+	join ntl_prd_allvm.acss_call_center_v acc
+       on ac.acss_call_ctr_cd = acc.acss_call_ctr_cd
+    join ntl_prd_allvm.acss_dept_v d
+       on ac.acss_dept_id = d.acss_dept_id
+   
+   where
+   	ac.acss_call_type_cd  in (1,2,3,6,7,8,9,10,11)
+	and ac.acss_dept_id in (select acss_dept_id from ntl_prd_qmtbls.ndcir_acss_depts where exclusion_type in('45','345'))
+	
+) with data
+primary index(cust_id, cust_line_seq_id, acss_call_id)
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;       
+
+create  volatile table nccir_os_type1 as (
+select acss_call_dt,
+       acss_call_ctr_cd,
+       acss_dept_id
+from nccir_calls
+where  acss_call_type_cd in ('1','7')
+and    acss_call_ctr_type = 'o'
+group by 1,2,3
+) with data
+primary index (acss_call_dt, acss_call_ctr_cd, acss_dept_id)
+on commit preserve rows;
+
+update nccir_calls
+set    os_type3 = 0
+where  nccir_calls.acss_call_dt = nccir_os_type1.acss_call_dt
+and    nccir_calls.acss_call_ctr_cd = nccir_os_type1.acss_call_ctr_cd
+and    nccir_calls.acss_dept_id = nccir_os_type1.acss_dept_id
+and    nccir_calls.os_type3 > 0;
+
+update nccir_calls
+	set in_type3 = 0
+	where acss_dept_id in (select acss_dept_id from ntl_prd_qmtbls.ndcir_acss_depts where exclusion_type = '345');
+
+
+
+create volatile table emh_ndcir_NC as (
+select
+	a.activity_type                 
+	, a.activity_mth                  
+	, a.ACTIVITY_DT                   
+	, a.AREA_DESC                     
+	, a.REGION_DESC                   
+	, a.SOR_ID                        
+	, a.CUST_ID                       
+	, a.CUST_LINE_SEQ_ID              
+	, a.ACCT_NUM                      
+	, a.SLS_OUTLET_ID                 
+	, a.SLS_PRSN_ID                   
+	, a.prod_nm                       
+	, a.ESN_NUM                       
+	, a.prod_nm_prev                  
+	, a.fulfillement_ind              
+	, a.SLS_DIST_CHNL_CHURN_CTGRY     
+	, a.hr_employee_id                
+	, a.nt_user_id                    
+	, a.ADDR_LINE1                    
+	, a.CITY_NM                       
+	, a.STATE_CD                      
+	, a.ZIP5_CD                       
+	, a.sls_area_desc                 
+	, a.sls_region_desc               
+	, a.ECPD_PROFILE_ID               
+	, a.ECPD_LIABILITY_TYPE_CD        
+	, a.LANG_PREF_IND                 
+	,c.acss_call_dt
+	,c.acss_call_tm
+	,c.acss_call_id
+	,c.acd_call_id
+	,c.ivr_call_id
+	,c.acss_user_id
+	,c.acss_call_ctr_cd
+	,c.acss_call_ctr_type
+	,c.acss_dept_id
+	,c.call_start_tm
+	,c.call_end_tm
+	,c.call_duration
+	,c.call_period
+	,c.acss_call_type_cd
+	,c.included_call
+	,coalesce(c.in_type1,0) as in_type1
+	,coalesce(c.in_type3,0) as in_type3
+	,coalesce(c.in_type7,0) as in_type7
+	,coalesce(c.in_other_type,0) as in_other_type
+	,coalesce(c.os_type1,0) as os_type1
+	,coalesce(c.os_type3,0) as os_type3
+	,coalesce(c.os_type7,0) as os_type7
+	,coalesce(c.os_other_type,0) as os_other_type
+	,a.mtn
+	
+from nccir_acts a 
+left join nccir_calls c
+on a.cust_id=c.cust_id
+and a.cust_line_seq_id=c.cust_line_seq_id
+and a.activity_mth=c.activity_mth
+	
+) with data
+primary index(cust_id, cust_line_seq_id, acss_call_id, activity_dt, hr_employee_id)
+index(activity_dt)
+on commit preserve rows;
+
+
+drop table nccir_base1;
+drop table nccir_base1a;
+drop table nccir_base1b;
+drop table nccir_acts;
+drop table nccir_calls;
+drop table nccir_os_type1;
+
+
+/***UpgradeData***/
+
+create volatile table upcir_base1
+as
+(
+select 
+	'UP' as activity_type
+	,(e.pymnt_dt - (extract(day from  e.pymnt_dt) - 1)) as activity_mth
+	,e.pymnt_dt as activity_dt
+	,mh.area_desc
+	,mh.region_desc
+    ,e.sor_id
+	,e.cust_id
+	,e.cust_line_seq_id
+	,e.acct_num
+	,e.mtn
+	,e.trans_sls_outlet_id as sls_outlet_id
+	,case when e.prod_nm like 'Gemalto%'
+		then e.device_prod_nm
+		else coalesce(e.device_prod_nm,e.prod_nm) 
+	end as prod_nm
+	,e.esn_num
+	,case when e.prod_nm_prev like 'Gemalto%'
+		then e.device_prod_nm_prev
+		else coalesce(e.device_prod_nm_prev, e.prod_nm_prev) 
+	end as prod_nm_prev	
+	,sdct.sls_dist_chnl_churn_ctgry
+ 	,ml.addr_line1
+ 	,ml.city_nm
+ 	,ml.state_cd
+ 	,ml.zip5_cd
+ 	,m.area_desc as sls_area_desc
+	,m.region_desc as sls_region_desc
+ 	,z.tm_zone
+ 	,dea.eroes_user_id
+ 	,e.invc_num
+ 	,e.invc_line_num
+ 	,e.store_num
+ 	,e.user_id
+				
+from 	ntl_prd_allvm.equip_sum_fact_v e
+
+inner join emh_nccir_date_range snr
+	on snr.date_range = activity_mth
+			
+inner join ntl_prd_allvm.cust_acct_line_dly_hist_v calh
+	on e.cust_id = calh.cust_id
+	and e.cust_line_seq_id = calh.cust_line_seq_id
+	and e.sor_id = calh.sor_id
+	and e.pymnt_dt between calh.eff_dt and calh.exp_dt
+				
+inner  join  ntl_prd_allvm.market_hist_v mh
+	on calh.sor_id = mh.sor_id
+	and calh.mkt_cd = mh.mkt_cd
+	and e.pymnt_dt between mh.eff_dt and coalesce (mh.exp_dt, date)
+				
+inner join ntl_prd_allvm.outlet_v o
+	on o.sls_outlet_id=e.trans_sls_outlet_id
+				
+inner  join ntl_prd_allvm.master_location_v ml
+	on ml.master_loc_cd=o.master_loc_cd
+	
+	left join ntl_prd_allvm.market_v m
+		on o.sls_outlet_mkt_cd=m.mkt_cd
+		and o.sor_id=m.sor_id
+				
+inner join ntl_prd_allvm.sales_dist_channel_type_v sdct
+	on sdct.sls_dist_chnl_type_cd=e.sls_dist_chnl_type_cd
+	and sdct.sor_id=e.sor_id
+			
+left join ntl_prd_allvm.zip_v z
+	on z.zip5_cd=ml.zip5_cd 	
+
+	left join (select 
+	sor_id
+	,cust_id
+	,cust_line_seq_id
+	,trans_dt
+	,eroes_user_id
+
+	from ntl_prd_allvm.dly_eroes_activity_v
+	
+	where trans_type_cd in ('UP','AU')
+	qualify row_number() over (partition by cust_id, cust_line_seq_id order by cust_id, cust_line_seq_id) =1) dea
+		on e.sor_id=dea.sor_id
+		and e.cust_id=dea.cust_id
+		and e.cust_line_seq_id=dea.cust_line_seq_id
+		and dea.trans_dt between e.pymnt_dt - 30 and e.pymnt_dt + 30
+
+where --activity_mth = (select date_range from emh_nccir_date_range)
+	 e.acq_ret_ind = 'R' --retained custs
+	and e.pos_managed_ind IN ('c','d') --consolidated markets
+	and (e.pos_prepaid_ind = 'n' OR e.pos_prepaid_ind IS NULL) --postpaid from equip table
+	and e.rev_gen_ind <> 'N' --revenue generating
+	and  e.pymnt_dt between '?start_dt'and '?end_dt'
+	and (e.ia_item_class_cd in ('data - new','phone - new','phone - ocpo','data - ocpo') or e.ia_item_class_cd is null) 
+	and calh.prepaid_ind <> 'Y' --postpaid from calhist
+	and calh.line_type_cd not in ('O','T')  --price plan categories (Telemetry or Onstar specifically)- not counted is EIS subscriber counts
+		--		and e.fin_upg_flag='Y' --This aligns with ESSBASE method of reporting upgrades
+	and e.trans_type_desc <> 'Return'
+	and (e.unit_only_ind ='N' or e.unit_only_ind is null)
+
+qualify row_number() over (partition by e.cust_id, e.cust_line_seq_id, e.pymnt_dt order by e.cust_id, e.cust_line_seq_id, e.pymnt_dt) = 1
+) with data
+primary index(cust_id, cust_line_seq_id) 
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;
+
+create volatile table upcir_base2
+as
+(
+select 
+	base1.activity_type
+	,base1.activity_mth
+	,base1.activity_dt
+	,base1.area_desc
+	,base1.region_desc
+	,base1.sor_id
+	,base1.cust_id
+	,base1.cust_line_seq_id
+	,base1.acct_num
+	,base1.mtn
+	,base1.sls_outlet_id
+	,pos.sls_prsn_id
+	,sp.emp_id
+	,base1.prod_nm
+	,base1.esn_num
+	,base1.prod_nm_prev
+	,coalesce(pos.fulfillment_ind,'L') as fulfillment_ind
+	,base1.sls_dist_chnl_churn_ctgry
+	,base1.eroes_user_id
+	,base1.addr_line1
+	,base1.city_nm
+	,base1.state_cd
+	,base1.zip5_cd
+	,base1.sls_area_desc
+	,base1.sls_region_desc
+	,base1.tm_zone
+	,coalesce(pos.invc_dt,dad.trans_dt,base1.activity_dt) as invc_dt
+	,pos.invc_tm
+	,dad.trans_tm
+	,coalesce(pos.invc_tm,cast((substr(cast(dad.trans_tm as char(8)),1,2)||substr(cast(dad.trans_tm as char(8)),4,2)|| substr(cast(dad.trans_tm as char(8)),7,2)) as integer)) as invc_tm_int
+	,pos.acss_user_id
+	,base1.user_id
+
+from upcir_base1 base1
+
+inner join emh_nccir_date_range snr
+	on snr.date_range =  base1.activity_mth
+
+left join ntl_prd_allvm.pos_trans_v pos
+	on base1.invc_num = pos.invc_num
+	and base1.invc_line_num = pos.invc_line_num
+	and base1.store_num = pos.store_num
+	and base1.activity_dt = pos.pymnt_dt
+	and pos.pymnt_dt between snr.date_range and (add_months(snr.date_range,1)-1)
+	and pos.invc_dt  between add_months(snr.date_range,-1) and (add_months(snr.date_range,1)-1)
+	
+left join 
+	(select
+	cust_id
+	,cust_line_seq_id
+	,activity_cd
+	,sls_prsn_id
+	,user_id
+	,trans_dt
+	,max(trans_tm) as trans_tm
+from 
+	ntl_prd_allvm.dly_activity_detail_v
+	
+	inner join emh_nccir_date_range snr
+		on snr.date_range = (trans_dt - (extract(day from  trans_dt) - 1))
+where
+	activity_cd in ('TR','QH')
+	and trans_dt between snr.date_range and (add_months(snr.date_range,1)-1)
+group by 1,2,3,4,5,6
+	) dad
+	on dad.cust_id=base1.cust_id
+	and dad.cust_line_seq_id=base1.cust_line_seq_id
+	
+left join ntl_prd_allvm.sales_person_v sp
+	on pos.sls_prsn_id=sp.sls_prsn_id
+	
+qualify row_number() over (partition by base1.cust_id, base1.cust_line_seq_id, base1.activity_dt, pos.invc_dt, pos.invc_tm order by base1.cust_id, base1.cust_line_seq_id, base1.activity_dt, pos.invc_dt, pos.invc_tm) =1
+	
+) with data
+primary index(cust_id, cust_line_seq_id) 
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;
+
+create volatile table upcir_base2a
+as
+(
+select
+	base2.activity_dt
+	,base2.cust_id
+	,base2.cust_line_seq_id
+	,base2.sls_prsn_id
+	,base2.emp_id
+	,base2.user_id
+	,base2.eroes_user_id
+	,he.emp_id as emp_id_from_user_id_he
+	,c.emp_id as emp_id_from_user_id_c
+--	,he3.emp_id as emp_id_from_eroes_user_id_he
+--	,c3.emp_id as emp_id_from_eroes_user_id_c
+	
+from upcir_base2 base2
+
+left join ntl_prd_allvm.hr_employee_hist_v he
+	on base2.user_id=he.nt_user_id
+	and base2.activity_dt between he.eff_dt and he.exp_dt
+	
+left join ntl_prd_allvm.contractor_hist_v c
+	on base2.user_id=c.nt_user_id
+	and base2.activity_dt between c.eff_dt and c.exp_dt
+	
+--left join ntl_prd_allvm.hr_employee_hist_v he3
+--	on base2.eroes_user_id=he3.nt_user_id
+--	and base2.activity_dt between he3.eff_dt and he3.exp_dt
+	
+--left join ntl_prd_allvm.contractor_hist_v c3
+--	on base2.eroes_user_id=c3.nt_user_id
+--	and base2.activity_dt between c3.eff_dt and c3.exp_dt
+) with data
+primary index(cust_id, cust_line_seq_id) 
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;	
+
+create volatile table upcir_base2aa
+as
+(
+select
+	base2.activity_dt
+	,base2.cust_id
+	,base2.cust_line_seq_id
+	,base2.sls_prsn_id
+	,base2.emp_id
+	,base2.user_id
+	,base2.eroes_user_id
+--	,he.emp_id as emp_id_from_user_id_he
+--	,c.emp_id as emp_id_from_user_id_c
+	,he3.emp_id as emp_id_from_eroes_user_id_he
+	,c3.emp_id as emp_id_from_eroes_user_id_c
+	
+from upcir_base2 base2
+
+--left join ntl_prd_allvm.hr_employee_hist_v he
+--	on base2.user_id=he.nt_user_id
+--	and base2.activity_dt between he.eff_dt and he.exp_dt
+	
+--left join ntl_prd_allvm.contractor_hist_v c
+--	on base2.user_id=c.nt_user_id
+--	and base2.activity_dt between c.eff_dt and c.exp_dt
+	
+left join ntl_prd_allvm.hr_employee_hist_v he3
+	on base2.eroes_user_id=he3.nt_user_id
+	and base2.activity_dt between he3.eff_dt and he3.exp_dt
+	
+left join ntl_prd_allvm.contractor_hist_v c3
+	on base2.eroes_user_id=c3.nt_user_id
+	and base2.activity_dt between c3.eff_dt and c3.exp_dt
+) with data
+primary index(cust_id, cust_line_seq_id) 
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;	
+
+create volatile table upcir_base2b
+as
+(
+select 
+	base2a.activity_dt
+	,base2a.cust_id
+	,base2a.cust_line_seq_id
+	,case when base2a.sls_prsn_id is not null and base2a.sls_prsn_id <> 'ENC' then 
+			case when (base2a.emp_id is null or base2a.emp_id='999999') then coalesce(base2a.emp_id_from_user_id_he,base2a.emp_id_from_user_id_c, base2aa.emp_id_from_eroes_user_id_he, base2aa.emp_id_from_eroes_user_id_c, 'SP_TBD') 
+						else base2a.emp_id end 
+		when base2a.sls_prsn_id ='ENC' then coalesce(base2a.emp_id_from_user_id_he,base2a.emp_id_from_user_id_c, base2aa.emp_id_from_eroes_user_id_he, base2aa.emp_id_from_eroes_user_id_c, 'SP_TBD')
+		when base2a.sls_prsn_id is null then 
+			case when base2a.user_id <> 'POSEMP' then coalesce(base2a.emp_id_from_user_id_he,base2a.emp_id_from_user_id_c, base2aa.emp_id_from_eroes_user_id_he, base2aa.emp_id_from_eroes_user_id_c, 'SP_TBD') 
+			 when base2a.user_id is null then coalesce(base2aa.emp_id_from_eroes_user_id_he, base2aa.emp_id_from_eroes_user_id_c, 'SP_TBD') 
+			 when base2a.user_id='POSEMP' then coalesce(base2aa.emp_id_from_eroes_user_id_he, base2aa.emp_id_from_eroes_user_id_c, 'SP_TBD')  end 
+	else 'still not found' end as hr_employee_id
+	,coalesce(he.nt_user_id,c.nt_user_id,'-') as nt_user_id
+
+from upcir_base2a base2a
+
+join upcir_base2aa base2aa
+	on base2a.activity_dt=base2aa.activity_dt
+	and base2a.cust_id=base2aa.cust_id
+	and base2a.cust_line_seq_id=base2aa.cust_line_seq_id
+
+left join ntl_prd_allvm.hr_employee_v he
+	on hr_employee_id=he.emp_id
+
+left join ntl_prd_allvm.contractor_v c
+	on hr_employee_id=c.emp_id
+) with data
+primary index(cust_id, cust_line_seq_id) 
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;
+
+drop table upcir_base1;
+drop table upcir_base2a;
+drop table upcir_base2aa;		
+
+create volatile table upcir_base2bb
+as
+(
+select
+	base2.activity_type
+	,base2.activity_mth
+	,base2.activity_dt
+	,base2.area_desc
+	,base2.region_desc
+	,base2.sor_id
+	,base2.cust_id
+	,base2.cust_line_seq_id
+	,base2.acct_num
+	,base2.mtn
+	,base2.sls_outlet_id
+	,base2.sls_prsn_id
+	,base2.prod_nm
+	,base2.esn_num
+	,base2.prod_nm_prev
+	,case when (base2.sls_dist_chnl_churn_ctgry in ('Internet','Indirect Internet') and base2.fulfillment_ind<>'F') then 'F' else base2.fulfillment_ind end as fulfillment_ind
+	,base2.sls_dist_chnl_churn_ctgry
+	,base2.acss_user_id
+	,base2b.hr_employee_id
+	,base2b.nt_user_id
+	,base2.addr_line1
+	,base2.city_nm
+	,base2.state_cd
+	,base2.zip5_cd
+	,base2.sls_area_desc
+	,base2.sls_region_desc
+	,base2.tm_zone
+	,base2.invc_dt
+	,base2.invc_tm
+	,base2.trans_tm
+	,base2.invc_tm_int
+	
+from upcir_base2 base2
+
+	join upcir_base2b base2b
+		on base2b.activity_dt=base2.activity_dt
+		and base2b.cust_id=base2.cust_id
+		and base2b.cust_line_seq_id=base2.cust_line_seq_id
+	
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;
+
+drop table upcir_base2;
+drop table upcir_base2b;
+
+create volatile table upcir_base3
+as
+(
+select
+	base2bb.*
+	,ecpd.ecpd_profile_id
+	,ecpd.ecpd_liability_type_cd
+	,cadh.lang_pref_ind
+	
+from upcir_base2bb base2bb
+
+	left join ntl_prd_allvm.cust_ecpd_v ecpd
+		on base2bb.sor_id=ecpd.sor_id
+		and base2bb.cust_id = ecpd.cust_id
+		and base2bb.activity_dt between ecpd.ecpd_eff_dt and coalesce(ecpd.ecpd_term_dt, current_date)
+		
+	left join ntl_prd_allvm.cust_acct_dly_hist_v cadh
+		on base2bb.sor_id=cadh.sor_id
+		and base2bb.cust_id=cadh.cust_id
+		and base2bb.acct_num=cadh.acct_num
+		and base2bb.activity_dt between cadh.eff_dt and coalesce(cadh.exp_dt, current_date)
+
+	
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;
+
+create volatile table upcir_acts
+as
+(
+select
+	base3.*
+	,case 
+		when base3.tm_zone = 'Central' 
+			then base3.invc_tm_int + 3600
+		when base3.tm_zone = 'Mountain' and base3.state_cd <> 'AZ'
+			then base3.invc_tm_int + 7200
+		when base3.tm_zone = 'Pacific'
+			then base3.invc_tm_int + 10800
+		when base3.tm_zone = 'Hawaii'
+			then 
+				case when base3.activity_dt between d.begindate and d.enddate
+				 	then base3.invc_tm_int + 18000
+					else base3.invc_tm_int + 21600
+				end
+		when base3.state_cd='AZ'
+			then 
+				case when base3.activity_dt between d.begindate and d.enddate
+				 	then base3.invc_tm_int + 7200
+					else base3.invc_tm_int + 10800
+				end
+		else base3.invc_tm_int
+		end as tm_ESTAdjusted
+
+from 
+	haberer.upcir_base3 base3
+	left outer join ntl_prd_qmtbls.mrs_dst d
+		on d.begindate=base3.activity_dt	
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(activity_dt) order by values(activity_dt)
+on commit preserve rows;
+
+create volatile table upcir_acts_temp
+as 
+(
+select 
+a.*
+from
+(
+select *
+from haberer.upcir_acts
+where 
+activity_mth = (select date_range from emh_nccir_date_range)
+) a
+
+qualify row_number() over (partition by a.cust_id, a.cust_line_seq_id order by a.cust_id, a.cust_line_seq_id, a.activity_dt) =1
+) with data
+primary index( cust_id, cust_line_seq_id)
+index(activity_dt)
+on commit preserve rows;
+
+
+create volatile table upcir_calls_base1
+as 
+(
+select
+	a.activity_mth
+	,a.activity_dt
+	,a.cust_id
+	,a.cust_line_seq_id
+    ,c.acss_call_id
+    ,c.acd_call_id
+    ,c.ivr_call_id
+	,a.invc_dt
+    ,c.acss_call_dt
+	,a.invc_tm
+	,a.trans_tm
+    ,a.tm_estadjusted  
+    ,c.acss_call_tm
+    ,cast((substr(cast(c.acss_call_tm as char(8)),1,2) || substr(cast(c.acss_call_tm as char(8)),4,2)||substr(cast(c.acss_call_tm as char(8)),7,2)) as integer) as acss_call_tm_int
+    ,cc.acss_call_ctr_time_zn
+   	,c.call_start_tm
+	,c.call_end_tm
+	,c.call_disconnect_tm - c.call_start_tm day(4) to second(0) as call_duration
+    ,c.acss_user_id
+    ,c.acss_call_type_cd
+    ,cc.acss_call_ctr_type
+    ,cc.acss_call_ctr_cd
+    ,cc.acss_call_ctr_desc
+    ,d.acss_dept_id
+    ,d.acss_dept_desc
+    ,cc.acss_area_cd
+	,(c.acss_call_dt - a.activity_dt) as call_period
+    ,case when cc.acss_call_ctr_type = 'v' and c.acss_call_type_cd = '1' then 1 else 0 end as in_type1
+    ,case when cc.acss_call_ctr_type = 'v' and c.acss_call_type_cd = '3' then 1 else 0 end as in_type3
+    ,case when cc.acss_call_ctr_type = 'v' and c.acss_call_type_cd = '7' then 1 else 0 end as in_type7
+    ,case when cc.acss_call_ctr_type = 'v' and c.acss_call_type_cd not in ('1','3','7') then 1 else 0 end as in_other_type
+    ,case when cc.acss_call_ctr_type = 'o' and c.acss_call_type_cd = '1' then 1 else 0 end as os_type1
+    ,case when cc.acss_call_ctr_type = 'o' and c.acss_call_type_cd = '3' and d.acss_dept_desc not like '%offline%' then 1 else 0 end as os_type3
+    ,case when cc.acss_call_ctr_type = 'o' and c.acss_call_type_cd = '7' then 1 else 0 end as os_type7
+    ,case when cc.acss_call_ctr_type = 'o' and c.acss_call_type_cd not in ('1','3','7') then 1 else 0 end as os_other_type
+from haberer.upcir_acts a 
+
+join ntl_prd_allvm.acss_call_v c
+	on a.cust_id=c.cust_id
+	and a.cust_line_seq_id=c.cust_line_seq_id
+	and c.acss_call_dt between a.activity_dt and a.activity_dt+31
+	
+join ntl_prd_allvm.acss_call_center_v cc
+       on c.acss_call_ctr_cd = cc.acss_call_ctr_cd
+join ntl_prd_allvm.acss_dept_v d
+       on c.acss_dept_id = d.acss_dept_id
+where  c.acss_call_type_cd  in ('1','2','3','6','7','8','9','10','11')
+	and d.acss_dept_id in (select acss_dept_id from ntl_prd_qmtbls.ndcir_acss_depts where exclusion_type in('45','345'))
+) with data
+primary index(acss_call_id, cust_id, cust_line_seq_id)
+index(acss_call_dt) order by values(acss_call_dt)
+on commit preserve rows;
+
+--create adjusted time to be used for calculations
+create volatile table upcir_calls_base2
+as
+(
+select
+	calls_base1.*
+
+	,case 
+		when calls_base1.acss_call_ctr_time_zn = 'CDT' 
+			then calls_base1.acss_call_tm_int + 3600
+		when calls_base1.acss_call_ctr_time_zn = 'MDT'
+			then calls_base1.acss_call_tm_int + 7200
+		when calls_base1.acss_call_ctr_time_zn = 'PDT'
+			then calls_base1.acss_call_tm_int + 10800
+		when calls_base1.acss_call_ctr_time_zn = 'MST'
+			then 
+				case when calls_base1.acss_call_dt between d.begindate and d.enddate
+				 	then calls_base1.acss_call_tm_int + 7200
+					else calls_base1.acss_call_tm_int + 10800
+				end
+		else calls_base1.acss_call_tm_int
+		end as acss_tm_ESTAdjusted
+
+
+from 
+	haberer.upcir_calls_base1 calls_base1
+	left outer join ntl_prd_qmtbls.mrs_dst d
+		on d.begindate=calls_base1.acss_call_dt	
+) with data
+primary index(acss_call_id)
+index(acss_call_dt) order by values(acss_call_dt)
+on commit preserve rows;		
+
+create volatile table upcir_calls
+as
+(
+select
+	cbase2.*
+	,(cbase2.acss_tm_estadjusted - cbase2.tm_estadjusted) as time_diff
+	,case when cbase2.call_period=0 and time_diff < 0 then 'N' else 'Y' end as included_call
+    ,row_number() over (partition by cbase2.cust_id order by cbase2.cust_id,cbase2.cust_line_seq_id,cbase2.acss_call_dt,cbase2.acss_call_tm) as row_num
+    
+from upcir_calls_base2 cbase2
+) with data
+primary index(cust_id, cust_line_seq_id)
+index(acss_call_id)
+on commit preserve rows;
+
+create volatile table upcir_os_type1_upgrade as (
+select acss_call_dt,
+       acss_call_ctr_cd,
+       acss_dept_id
+from upcir_calls
+where  acss_call_type_cd in ('1','7')
+and    acss_call_ctr_type = 'o'
+group by 1,2,3
+) with data
+primary index (acss_call_dt,acss_call_ctr_cd,acss_dept_id)
+on commit preserve rows;
+
+update upcir_calls
+set    os_type3 = 0
+where  upcir_calls.acss_call_dt = upcir_os_type1_upgrade.acss_call_dt
+and    upcir_calls.acss_call_ctr_cd = upcir_os_type1_upgrade.acss_call_ctr_cd
+and    upcir_calls.acss_dept_id = upcir_os_type1_upgrade.acss_dept_id
+and    upcir_calls.os_type3 > 0;
+
+update upcir_calls
+	set in_type3 = 0
+	where acss_dept_id in (select acss_dept_id from ntl_prd_qmtbls.ndcir_acss_depts where exclusion_type = '345');
+	
+
+delete from upcir_calls
+where included_call='N';	 
+	
+create volatile table emh_ndcir_UP as (
+select
+	a.activity_type
+	,a.activity_mth
+	,a.activity_dt
+	,a.area_desc
+	,a.region_desc
+	,a.sor_id
+	,a.cust_id
+	,a.cust_line_seq_id
+	,a.acct_num
+	,a.sls_outlet_id
+	,a.sls_prsn_id
+	,a.prod_nm
+	,a.esn_num
+	,a.prod_nm_prev
+	,a.fulfillment_ind
+	,a.sls_dist_chnl_churn_ctgry
+	,a.hr_employee_id
+	,a.nt_user_id
+	,a.addr_line1
+	,a.city_nm
+	,a.state_cd
+	,a.zip5_cd
+	,a.sls_area_desc
+	,a.sls_region_desc
+	,a.ecpd_profile_id
+	,a.ecpd_liability_type_cd
+	,a.lang_pref_ind
+	,c.acss_call_dt
+	,c.acss_call_tm
+	,c.acss_call_id
+	,c.acd_call_id
+	,c.ivr_call_id
+	,c.acss_user_id
+	,c.acss_call_ctr_cd
+	,c.acss_call_ctr_type
+	,c.acss_dept_id
+	,c.call_start_tm
+	,c.call_end_tm
+	,c.call_duration
+	,c.call_period
+	,c.acss_call_type_cd
+	,c.included_call
+	,coalesce(c.in_type1,0) as in_type1
+	,coalesce(c.in_type3,0) as in_type3
+	,coalesce(c.in_type7,0) as in_type7
+	,coalesce(c.in_other_type,0) as in_other_type
+	,coalesce(c.os_type1,0) as os_type1
+	,coalesce(c.os_type3,0) as os_type3
+	,coalesce(c.os_type7,0) as os_type7
+	,coalesce(c.os_other_type,0) as os_other_type
+	,a.mtn
+	
+from upcir_acts a 
+left join upcir_calls c
+on a.cust_id=c.cust_id
+and a.cust_line_seq_id=c.cust_line_seq_id
+and a.activity_mth=c.activity_mth
+
+) with data
+primary index(cust_id, cust_line_seq_id, acss_call_id, activity_dt, hr_employee_id)
+index(activity_dt)
+on commit preserve rows;
+
+CREATE TABLE ntl_prd_qmtbls.emh_ndcir_detail
+
+AS
+
+(select 
+	activity_type
+	,activity_mth
+	,activity_dt
+	,area_desc
+	,region_desc
+	,sor_id
+	,cust_id
+	,cust_line_seq_id
+	,acct_num
+	,sls_outlet_id
+	,sls_prsn_id
+	,prod_nm
+	,esn_num
+	,prod_nm_prev
+	,fulfillment_ind
+	,sls_dist_chnl_churn_ctgry
+	,hr_employee_id
+	,nt_user_id
+	,addr_line1
+	,city_nm
+	,state_cd
+	,zip5_cd
+	,sls_area_desc
+	,sls_region_desc
+	,ecpd_profile_id
+	,ecpd_liability_type_cd
+	,lang_pref_ind
+	,acss_call_dt
+	,acss_call_tm
+	,acss_call_id
+	,acd_call_id
+	,ivr_call_id
+	,acss_user_id
+	,acss_call_ctr_cd
+	,acss_call_ctr_type
+	,acss_dept_id
+	,call_start_tm
+	,call_end_tm
+	,call_duration
+	,call_period
+	,acss_call_type_cd
+	,included_call
+	,in_type1
+	,in_type3
+	,in_type7
+	,in_other_type
+	,os_type1
+	,os_type3
+	,os_type7
+	,os_other_type
+	,mtn
+
+from emh_ndcir_UP
+
+union all
+
+select
+activity_type                 
+	, activity_mth                  
+	, ACTIVITY_DT                   
+	, AREA_DESC                     
+	, REGION_DESC                   
+	, SOR_ID                        
+	, CUST_ID                       
+	, CUST_LINE_SEQ_ID              
+	, ACCT_NUM                      
+	, SLS_OUTLET_ID                 
+	, SLS_PRSN_ID                   
+	, prod_nm                       
+	, ESN_NUM                       
+	, prod_nm_prev                  
+	, fulfillement_ind              
+	, SLS_DIST_CHNL_CHURN_CTGRY     
+	, hr_employee_id                
+	, nt_user_id                    
+	, ADDR_LINE1                    
+	, CITY_NM                       
+	, STATE_CD                      
+	, ZIP5_CD                       
+	, sls_area_desc                 
+	, sls_region_desc               
+	, ECPD_PROFILE_ID               
+	, ECPD_LIABILITY_TYPE_CD        
+	, LANG_PREF_IND                 
+	,acss_call_dt
+	,acss_call_tm
+	,acss_call_id
+	,acd_call_id
+	,ivr_call_id
+	,acss_user_id
+	,acss_call_ctr_cd
+	,acss_call_ctr_type
+	,acss_dept_id
+	,call_start_tm
+	,call_end_tm
+	,call_duration
+	,call_period
+	,acss_call_type_cd
+	,included_call
+	,in_type1
+	,in_type3
+	,in_type7
+	,in_other_type
+	,os_type1
+	,os_type3
+	,os_type7
+	,os_other_type
+	,mtn
+
+from emh_ndcir_NC
+
+
+) WITH DATA PRIMARY INDEX(
+activity_type
+,activity_mth
+,activity_dt
+,area_desc
+,region_desc
+,sor_id
+,cust_id
+,cust_line_seq_id
+,acct_num
+,sls_outlet_id
+,sls_prsn_id
+,prod_nm
+,esn_num
+,prod_nm_prev
+,fulfillment_ind
+,sls_dist_chnl_churn_ctgry
+,hr_employee_id
+,nt_user_id
+,addr_line1
+,city_nm
+,state_cd
+,zip5_cd
+,sls_area_desc
+,sls_region_desc
+,ecpd_profile_id
+,ecpd_liability_type_cd
+,lang_pref_ind
+,acss_call_dt
+,acss_call_tm
+,acss_call_id
+,acd_call_id
+,ivr_call_id
+,acss_user_id
+,acss_call_ctr_cd
+,acss_call_ctr_type
+,acss_dept_id
+,call_start_tm
+,call_end_tm
+,call_duration
+,call_period
+,acss_call_type_cd
+,included_call
+,in_type1
+,in_type3
+,in_type7
+,in_other_type
+,os_type1
+,os_type3
+,os_type7
+,os_other_type
+,mtn);
+
+
+
+
+/***drop table upcir_base2bb;
+drop table upcir_base3;
+drop table upcir_acts;
+drop table upcir_acts_temp;
+drop table upcir_calls_base1;
+drop table upcir_calls_base2;
+drop table upcir_calls;
+drop table upcir_os_type1_upgrade;***/
+
+delete from ntl_prd_qmtbls.emh_ndcir_detail
+where cust_id || cust_line_seq_id in 
+(
+select 
+	a.custs
+from
+(
+select 
+	cust_id || cust_line_seq_id as custs
+	,coalesce(sum(case when call_period < 3 then (in_type1 + in_type7 + in_other_type + os_type1 + os_type3 + os_type7 + os_other_type) end),0) as calls0To2
+	,coalesce(sum(case when call_period < 32 then (in_type1 + in_type7  + in_other_type + os_type1 + os_type3 + os_type7 + os_other_type) end),0) as calls0To31
+
+ from ntl_prd_qmtbls.emh_ndcir_detail
+
+where activity_mth = (select date_range from emh_nccir_date_range)
+
+group by 1
+
+having (calls0To2 > 199 or calls0To31 > 999)
+) a 
+);
+
+--  Final clean up of data to remove any instances where upgrades and new activations were done on the same account during the same month
+delete from ntl_prd_qmtbls.emh_ndcir_detail a
+where exists(
+select 
+	b.activity_type
+	,b.activity_dt
+	,b.cust_id
+	,b.cust_line_seq_id
+	,b.acss_call_id
+from
+(
+select 
+	up.activity_type
+	,up.activity_dt
+	,up.cust_id
+	,up.cust_line_seq_id
+	,up.acss_call_id
+
+from 
+(
+select 
+	activity_type
+	,activity_dt
+	,cust_id
+	,cust_line_seq_id
+	,acss_call_id
+
+from ntl_prd_qmtbls.emh_ndcir_detail
+where activity_mth=(select date_range from emh_nccir_date_range)
+and acss_call_id is not null
+and activity_type='UP'
+) up
+join
+(
+select 
+	activity_type
+	,activity_dt
+	,cust_id
+	,cust_line_seq_id
+	,acss_call_id
+
+from ntl_prd_qmtbls.emh_ndcir_detail
+where activity_mth=(select date_range from emh_nccir_date_range)
+and acss_call_id is not null
+and activity_type='NC'
+) nc
+	on up.cust_id=nc.cust_id
+	and up.cust_line_seq_id=nc.cust_line_seq_id
+	and up.acss_call_id=nc.acss_call_id
+) b
+
+where
+	b.activity_type=a.activity_type
+	and b.activity_dt=a.activity_dt
+	and b.cust_id=a.cust_id
+	and b.cust_line_seq_id=a.cust_line_seq_id
+	and b.acss_call_id=a.acss_call_id);
+	
+Select Top 100 *
+
+from ntl_prd_qmtbls.emh_ndcir_detail;
