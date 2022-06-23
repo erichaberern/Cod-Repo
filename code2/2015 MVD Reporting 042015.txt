@@ -1,0 +1,693 @@
+﻿/************************************************************************************************/
+ 
+/*CREATE MULTISET VOLATILE TABLE Date_Range_EMH , NO LOG AS
+  (select distinct   
+  ADD_MONTHS ((CURRENT_DATE-3) -(EXTRACT (DAY FROM (CURRENT_DATE-3))-1),0) AS START_DATE   
+ ,CASE WHEN EXTRACT (DAY FROM DATE) >3 THEN DATE -2   
+  ELSE ADD_MONTHS ((CURRENT_DATE-3) -(EXTRACT (DAY FROM (CURRENT_DATE-3))-1),1)   -1   
+  END AS END_DATE   
+    
+ FROM SYS_CALENDAR.CALENDAR as SC   
+    
+ WHERE SC.YEAR_OF_CALENDAR = EXTRACT(YEAR FROM DATE)   
+ 
+ ) with data
+primary index(START_DATE,END_DATE) 
+on commit preserve rows;*/
+
+/********************************************************************************************/
+
+CREATE MULTISET VOLATILE TABLE MVD_Capable_Devices_EMH , NO LOG AS
+(select
+PROD_NM
+,CASE WHEN OS_TYPE = 'ANDROID' 
+THEN 'ANDROID' 
+ELSE 'IOS' END AS OS_TYPE
+               
+FROM NTL_PRD_ALLVM.HANDSET_EQUIP_V
+
+WHERE((OS_TYPE = 'ANDROID' AND OS_VERSION >= '4') OR MFG_NM LIKE '%APPLE%')
+AND PROD_NM NOT LIKE '%IPAD%'
+
+GROUP BY 1,2                     
+) with data
+primary index(PROD_NM)
+on commit preserve rows;    
+
+/*******************************************************************************************/
+
+CREATE MULTISET VOLATILE TABLE Rep_Cust_Base , NO LOG AS
+(select
+(acall.acss_call_dt - (extract(day from acall.acss_call_dt) - 1)) as rpt_mnth,
+acc.acss_call_ctr_desc,
+acc.acss_call_ctr_cd,
+acall.sor_id,
+acall.acss_call_type_cd,
+case when acc.acss_area_cd = 'MW' then 'Midwest'
+when acc.acss_area_cd = 'NM' then 'Northeast'
+when acc.acss_area_cd = 'WE' then 'West'
+when acc.acss_area_cd = 'SO' then 'South'
+else acc.acss_area_cd end as Center_Area_desc,
+acall.cust_id,
+acall.cust_line_seq_id,
+acall.acct_num,
+acall.mtn,
+acall.acss_user_id,
+u.hr_employee_id,
+acall.acss_call_dt,
+acall.acss_call_tm,
+(acall.call_disconnect_tm - acall.call_start_tm) HOUR TO SECOND (0) AS call_duration_tm,
+(extract(hour from call_duration_tm) * 3600 +
+extract(minute from call_duration_tm) * 60 +
+extract(second from call_duration_tm)) as AHT,
+coalesce(sed.departmenttype,'Other') as depttype,
+coalesce(sed.departmentgroup, 'Other') as dept_group,
+case 
+when acc.acss_call_ctr_time_zn = 'CST' then cast(acall.ACSS_CALL_DT as TimeStamp(6))+ ((acall.acss_call_tm - time '00:00:00') hour to second(6)) + interval '1' hour 
+when acc.acss_call_ctr_time_zn = 'CDT' then cast(acall.ACSS_CALL_DT as TimeStamp(6))+ ((acall.acss_call_tm - time '00:00:00') hour to second(6)) + interval '1' hour 
+when acc.acss_call_ctr_time_zn = 'MST' then cast(acall.ACSS_CALL_DT as TimeStamp(6))+ ((acall.acss_call_tm - time '00:00:00') hour to second(6)) + interval '2' hour 
+when acc.acss_call_ctr_time_zn = 'MDT' then cast(acall.ACSS_CALL_DT as TimeStamp(6))+ ((acall.acss_call_tm - time '00:00:00') hour to second(6)) + interval '2' hour 
+when acc.acss_call_ctr_time_zn = 'PST' then cast(acall.ACSS_CALL_DT as TimeStamp(6))+ ((acall.acss_call_tm - time '00:00:00') hour to second(6)) + interval '3' hour 
+when acc.acss_call_ctr_time_zn = 'PDT' then cast(acall.ACSS_CALL_DT as TimeStamp(6))+ ((acall.acss_call_tm - time '00:00:00') hour to second(6)) + interval '3' hour 
+else cast(acall.ACSS_CALL_DT as TimeStamp(6))+ ((acall.acss_call_tm - time '00:00:00') hour to second(6))  
+End As CallDateTime_ET,  
+ad.acss_dept_desc,
+ad.acss_dept_id,
+acall.acss_call_id,
+acall.ivr_call_id
+
+from ntl_prd_allvm.acss_call_v as acall
+
+left join  ntl_prd_allvm.acss_call_center_v as acc                                      
+on  acall.acss_call_ctr_cd = acc.acss_call_ctr_cd                                  
+                                                                                                
+left join ntl_prd_allvm.acss_dept_v as ad                                  
+on acall.acss_dept_id = ad.acss_dept_id  
+
+left join  ntl_prd_qmtbls.emh_eccr_dep as sed
+on   ad.acss_dept_id = sed.acssdeptid 
+
+inner join ntl_prd_allvm.acss_user_dly_hist_v as u
+on acall.acss_user_id = u.acss_user_id
+and acall.acss_call_dt between u.eff_dt AND u.exp_dt 
+
+where acall.acss_call_dt  between '?start_date' and '?end_date'
+and acall.acss_call_type_cd not in ('3','4','5')
+and acall.cust_id is not null
+and acall.cust_line_seq_id is not null 
+and Center_Area_desc = 'Northeast'
+and dept_group in ('Special', 'Tech')
+
+qualify row_number() over (partition by acall.cust_id, acall.cust_line_seq_id, acall.acss_call_dt, acall.acss_user_id order by acall.cust_id, acall.cust_line_seq_id, acall.acss_call_dt, acall.acss_user_id) = 1
+
+) with data
+primary index(cust_id, cust_line_seq_id, acss_call_dt, acss_user_id)
+on commit preserve rows;
+
+/************************************************************************************************/
+
+CREATE MULTISET VOLATILE TABLE Rep_Cust_Base2 , NO LOG AS
+(select
+acall.rpt_mnth,
+case when m.area_cd = 'MW' then 'Midwest'
+when m.area_cd = 'NM' then 'Northeast'
+when m.area_cd = 'WE' then 'West'
+when m.area_cd = 'SO' then 'South'
+else m.area_cd end as Area_desc,
+m.region_desc,
+acall.acss_call_ctr_desc,
+acall.acss_call_ctr_cd,
+acall.sor_id,
+acall.acss_call_type_cd,
+acall.Center_Area_desc,
+acall.cust_id,
+acall.cust_line_seq_id,
+acall.acct_num,
+acall.mtn,
+coalesce(cal.device_prod_nm, cal.prod_nm) as cust_device,
+cal.eqp_device_id,
+dm.device_tier as Device_Tier,                             
+dm.data_tier_fin as Data_Tier,
+coalesce(case when emp.nm_mdlin is null then 
+emp.nm_last||', '||emp.nm_first 
+else emp.nm_last||', '||emp.nm_first||' '||trim(emp.nm_mdlin)||'.' end, 'Unknown') as employee_nm,
+emp.emp_id,
+coalesce(emp.super_nm_lvl1, 'Unknown') as Mgr_2,
+coalesce(emp.super_nm_lvl2, 'Unknown') as Mgr_1,
+acall.acss_user_id,
+acall.hr_employee_id,
+acall.acss_call_dt,
+acall.acss_call_tm,
+acall.call_duration_tm,
+acall.AHT,
+acall.depttype,
+acall.dept_group,
+acall.CallDateTime_ET,  
+acall.acss_dept_desc,
+acall.acss_dept_id,
+acall.acss_call_id,
+acall.ivr_call_id
+
+from Rep_Cust_Base as acall
+
+inner join ntl_prd_allvm.cust_acct_line_dly_hist_v  as cal
+on acall.cust_id = cal.cust_id
+and acall.cust_line_seq_id = cal.cust_line_seq_id
+and acall.acss_call_dt between cal.eff_dt and cal.exp_dt               
+
+inner join ntl_prd_allvm.market_hist_v AS  m
+on cal.sor_id = m.sor_id
+and cal.mkt_cd = m.mkt_cd
+and acall.acss_call_dt between m.eff_dt and coalesce(m.exp_dt, date)
+
+inner join ntl_prd_allvm.employee_contractor_hist_v as emp
+on acall.acss_user_id = emp.nt_user_id
+and acall.acss_call_dt between emp.eff_dt AND emp.exp_dt
+
+left join ntl_prd_allvm.device_dp_map_v AS dm                          
+on coalesce(cal.device_prod_nm, cal.prod_nm)  = dm.prod_nm 
+
+LEFT JOIN MVD_Capable_Devices_EMH AS DEV
+ON coalesce(cal.device_prod_nm, cal.prod_nm) = dev.prod_nm 
+
+where acall.acss_call_dt  between '?start_date' and '?end_date'
+
+
+qualify row_number() over (partition by acall.cust_id, acall.cust_line_seq_id, acall.acss_call_dt, acall.acss_user_id order by acall.cust_id, acall.cust_line_seq_id, acall.acss_call_dt, acall.acss_user_id) = 1
+
+) with data
+primary index(cust_id, cust_line_seq_id, acss_call_dt, acss_user_id)
+on commit preserve rows;
+
+/**********************************************************************************************/
+
+CREATE MULTISET VOLATILE TABLE MVD_User_Data_EMH , NO LOG AS
+(select
+mvd.sor_id,
+mvd.cust_id,
+mvd.cust_line_seq_id,
+mvd.mtn,
+mvd.eqp_device_id,
+mvd.mvmd_diag_dt,
+mvd.mvmd_diag_tm,
+mvd.nt_user_id,
+
+case 
+when acc.acss_call_ctr_time_zn = 'CST' then cast(ac.ACSS_CALL_DT as TimeStamp(6))+ ((ac.acss_call_tm - time '00:00:00') hour to second(6)) + interval '1' hour 
+when acc.acss_call_ctr_time_zn = 'CDT' then cast(ac.ACSS_CALL_DT as TimeStamp(6))+ ((ac.acss_call_tm - time '00:00:00') hour to second(6)) + interval '1' hour 
+when acc.acss_call_ctr_time_zn = 'MST' then cast(ac.ACSS_CALL_DT as TimeStamp(6))+ ((ac.acss_call_tm - time '00:00:00') hour to second(6)) + interval '2' hour 
+when acc.acss_call_ctr_time_zn = 'MDT' then cast(ac.ACSS_CALL_DT as TimeStamp(6))+ ((ac.acss_call_tm - time '00:00:00') hour to second(6)) + interval '2' hour 
+when acc.acss_call_ctr_time_zn = 'PST' then cast(ac.ACSS_CALL_DT as TimeStamp(6))+ ((ac.acss_call_tm - time '00:00:00') hour to second(6)) + interval '3' hour 
+when acc.acss_call_ctr_time_zn = 'PDT' then cast(ac.ACSS_CALL_DT as TimeStamp(6))+ ((ac.acss_call_tm - time '00:00:00') hour to second(6)) + interval '3' hour 
+else cast(ac.acss_call_dt as TimeStamp(6))+ ((ac.acss_call_tm - time '00:00:00') hour to second(6))  
+End As MvdCallDateTime_ET,
+(ac.call_disconnect_tm - ac.call_start_tm) HOUR TO SECOND (0) AS duration,
+case when duration is not null then '1' else '0' end as AHT_Count,
+(extract(hour from duration) * 3600 +
+extract(minute from duration) * 60 +
+extract(second from duration)) as MVD_AHT,  
+
+ac.acss_call_ctr_cd,
+ac.acss_call_tm,
+ac.acss_call_type_cd,
+ac.acss_call_id,
+ac.acss_dept_id,
+coalesce(mvd.ivr_call_id, ac.ivr_call_id) as mvd_ivr_call_id,
+COUNT(DISTINCT mvd.CUST_ID|| mvd.Cust_Line_SEQ_ID|| mvd.NT_USER_ID || mvd.MVMD_DIAG_DT  ) AS Total_MVD_SESSIONS  
+
+
+from ntl_prd_allvm.mvmd_diagnostic_v as mvd
+
+left join ntl_prd_allvm.acss_call_v  as ac
+on mvd.cust_id = ac.cust_id
+and mvd.cust_line_seq_id = ac.cust_line_seq_id
+and mvd.mvmd_diag_dt = ac.acss_call_dt
+and mvd.nt_user_id = ac.acss_user_id 
+and mvd.ivr_call_id = ac.ivr_call_id
+and ac.acss_call_type_cd not in ('3','4','5')
+
+
+left join  ntl_prd_allvm.acss_call_center_v as acc                                      
+on  ac.acss_call_ctr_cd = acc.acss_call_ctr_cd 
+
+Where mvd.MVMD_DIAG_DT   between '?start_date' and '?end_date'
+and mvd.mvmd_category <>  'queryDeviceRegistrationRequest'
+and mvd.mvmd_access_lvl = '2'
+and  mvd.NT_USER_ID IS NOT NULL
+
+qualify row_number() over (partition by mvd.cust_id, mvd.cust_line_seq_id, mvd.MVMD_DIAG_DT, mvd.NT_USER_ID order by mvd.cust_id, mvd.cust_line_seq_id, mvd.MVMD_DIAG_DT, mvd.NT_USER_ID) = 1
+
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
+
+) with data
+primary index(cust_id, cust_line_seq_id, nt_user_id)
+on commit preserve rows;
+
+/******************************************************************************************/
+
+CREATE MULTISET VOLATILE TABLE clnr_trans_EH , NO LOG
+AS(SELECT                                                
+ms.area_desc as sls_area_desc  
+,ms.region_desc as sls_region_desc
+,o.sls_dist_chnl_type_cd
+,p.sls_outlet_id
+,coalesce(case when o.sls_dist_chnl_type_cd = 'NC' and o.sls_outlet_nm like '%CUST%' then au.center 
+when o.sls_dist_chnl_type_cd = 'NC' and o.sls_outlet_nm like '%VND %'  Then au.center 
+else o.sls_outlet_nm end, 'Unknown') as Outlet
+,p.store_num
+,p.pos_src_id           
+,p.cust_area_cd      
+,p.netace_user_id
+,p.acss_user_id  
+,coalesce(p.acss_user_id, p.netace_user_id) as user_id       
+  ,p.invc_num                            
+,p.invc_line_num
+,mc.area_desc as cust_area_desc
+,mc.region_desc as cust_region_desc                    
+,p.cust_id                                
+,p.cust_line_seq_id                 
+,p.mtn
+,p.prod_nm                              
+,p.pymnt_dt
+,ml.zip5_cd
+,ml.state_cd
+,z.tm_zone
+,p.invc_dt
+,p.invc_tm
+
+,case when z.tm_zone = 'Central' 
+then 
+    cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second) 
+  + cast((1) As interval hour)
+when z.tm_zone = 'Mountain' and ml.state_cd <> 'AZ'
+then 
+    cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second) 
+  + cast((2) As interval hour)
+when z.tm_zone = 'Pacific'
+then 
+    cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second) 
+  + cast((3) As interval hour)
+when z.tm_zone = 'Hawaii'
+then 
+case when p.pymnt_dt between dst.begindate and dst.enddate
+then 
+    cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second) 
+  + cast((5) As interval hour)
+else 
+    cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second) 
+  + cast((6) As interval hour)
+end
+when ml.state_cd='AZ'
+then 
+case when p.pymnt_dt between dst.begindate and dst.enddate
+then 
+    cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second) 
+  + cast((2) As interval hour)
+else 
+    cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second) 
+  + cast((3) As interval hour)
+end
+Else
+cast(p.pymnt_dt AS timestamp(6))
+  + cast(p.invc_tm / 10000 AS interval hour)
+  + cast((p.invc_tm / 100) mod 100 AS interval minute)
+  + cast((p.invc_tm mod 100) AS interval second)
+end as OrderDateTime_ETAdjusted                            
+,p.sold_qty
+                                                                                                                                                                                                                                                                  
+                                                
+FROM ntl_prd_allvm.pos_trans_v as p
+
+JOIN ntl_prd_allvm.cust_acct_dly_hist_v AS ca        
+ON p.cust_id = ca.cust_id      
+AND p.acct_num = ca.acct_num
+AND p.pymnt_dt BETWEEN ca.eff_dt AND ca.exp_dt                      
+                
+JOIN ntl_prd_allvm.item_v as b                             
+ON p.item_cd = b.item_cd      
+AND p.sor_id = b.sor_id          
+AND p.region_cd = b.region_cd             
+AND b.item_cd LIKE ANY ('FRU%','CLNR%')          
+                                
+Left JOIN ntl_prd_allvm.outlet_v as o           
+ON p.sls_outlet_id = o.sls_outlet_id 
+AND p.sor_id = o.sor_id
+
+                                               
+Left  join ntl_prd_allvm.master_location_v as ml
+on o.master_loc_cd = ml.master_loc_cd
+                                                
+left join ntl_prd_allvm.zip_v z
+on ml.zip5_cd = z.zip5_cd
+                                                                
+left outer join ntl_prd_qmtbls.mrs_dst as dst
+on p.pymnt_dt = dst.begindate
+
+Left JOIN ntl_prd_allvm.market_v as ms 
+ON o.sls_outlet_mkt_cd = ms.mkt_cd
+                
+Left JOIN ntl_prd_allvm.market_v as mc 
+ON ca.sor_id = mc.sor_id
+AND ca.mkt_cd = mc.mkt_cd
+
+
+left join (select 
+au.nm_first || ' ' || au.nm_last as name
+,au.acss_user_id
+,au.hr_employee_id
+,au.eff_dt
+,au.exp_dt
+,case when acc.acss_call_ctr_desc in ('NE Columbia SC 2', 'NE Columbia SC') then 'NE Columbia' 
+else acc.acss_call_ctr_desc end as center
+,case when acc.acss_call_ctr_desc='HQ AFNI Tucson_NW VZW.COM' then 'VZW.COM'
+when acc.acss_call_ctr_desc='HQ AFNI Tucson_NW WDTS' then 'VZW.COM'
+when acc.acss_call_ctr_desc='NE Columbia SC 2' then 'SC'
+when acc.acss_call_ctr_desc='S AFNI Opelika - VZW.COM' then 'VZW.COM'
+when acc.acss_call_ctr_desc='S Little Rock AR 2' then 'AR'
+else substr(acc.acss_call_ctr_desc,character_length(trim(acc.acss_call_ctr_desc))-1,2)
+end as state
+,coalesce(case 
+when acc.acss_area_cd='NM' then 'Northeast' 
+when acc.acss_area_cd='MW' then 'Midwest'
+when acc.acss_area_cd='SO' then 'South'
+when acc.acss_area_cd='WE' then 'West'
+else acc.acss_area_cd end,substr(acc.acss_call_ctr_desc,1,2)) as area_cd
+        
+from ntl_prd_allvm.ACSS_USER_DLY_HIST_V as  au
+                
+join ntl_prd_allvm.acss_call_center_v acc
+on au.acss_call_ctr_cd=acc.acss_call_ctr_cd
+      
+ group by 1,2,3,4,5,6,7,8) as au
+                
+on p.acss_user_id = au.acss_user_id
+and p.pymnt_dt between au.eff_dt and au.exp_dt
+                                
+                            
+WHERE                                          
+p.pymnt_dt  between '?start_date' and '?end_date'
+and  sls_area_desc = 'Northeast'
+AND p.sold_qty > 0   
+  and (b.IA_ITEM_GROUP_CD like '%DATA%' OR
+b.IA_ITEM_GROUP_CD like '%PHONE%' OR
+b.IA_ITEM_GROUP_CD like '%VCP%' )       
+AND p.cust_id IS NOT NULL
+AND COALESCE (p.refund_applied_ind, 'E') <> 'R'    
+
+qualify row_number() over (partition by p.cust_id, p.cust_line_seq_id, p.pymnt_dt order by p.cust_id, p.cust_line_seq_id, p.pymnt_dt) = 1
+
+                                                
+)               
+                                                
+WITH DATA                                         
+PRIMARY INDEX (sls_dist_chnl_type_cd, sls_outlet_id, cust_area_desc, cust_region_desc, cust_area_cd, invc_num, invc_line_num, cust_id, cust_line_seq_id, mtn, pymnt_dt)                                             
+ON COMMIT PRESERVE ROWS;                
+        
+/************************************************************************************************/
+CREATE MULTISET VOLATILE TABLE ICM_EMH_V , NO LOG AS
+(select
+icm.call_answer_dt,
+icm.ivr_call_id,
+icm.eccr_line_bus_nm,
+icm.eccr_super_line_bus_nm,
+icm.bus_rule as bus_rule_icm,
+brm.bus_rule as bus_rule_brm,
+brm.lobkey,
+icm.mtn,
+icm.cust_id,
+icm.cust_line_seq_id,
+icm.acss_call_id,
+u.acss_user_id,
+icm.handle_tm_seconds as AHT
+
+	
+from  ntl_prd_allvm.icm_summary_fact_v as icm
+
+inner join ntl_prd_allvm.cust_acct_line_dly_hist_v  as cal
+on icm.cust_id = cal.cust_id
+and icm.cust_line_seq_id = cal.cust_line_seq_id
+and icm.call_answer_dt  between cal.eff_dt and cal.exp_dt
+
+inner join ntl_prd_allvm.tcd_v as tcd
+on icm.recoverykey = tcd.recoverykey
+
+left join NTL_PRD_ALLVM.ECCR_BUS_RULE_MAP_V as brm
+on icm.bus_rule = brm.bus_rule
+and icm.call_answer_dt between brm.eff_dt and brm.end_dt
+
+inner join ntl_prd_allvm.acss_user_dly_hist_v as u
+on tcd.agentperipheralnumber = u.hr_employee_id
+and icm.call_answer_dt between u.eff_dt AND u.exp_dt 
+
+left join  ntl_prd_allvm.acss_call_center_v as acc                                      
+on  u.acss_call_ctr_cd = acc.acss_call_ctr_cd                                  
+                                                                                                
+left join ntl_prd_allvm.acss_dept_v as ad                                  
+on u.acss_dept_id = ad.acss_dept_id  
+
+left join  ntl_prd_qmtbls.emh_eccr_dep as sed
+on   u.acss_dept_id = sed.acssdeptid 
+
+where  icm.call_answer_dt  between '?start_date' and '?end_date'
+and icm.eccr_dept_nm_agent = 'Tech'
+and icm.eccr_dept_nm = 'Tech'
+and icm.acd_area_nm_agent = 'Northeast'	
+and icm.ANSWERED_CNT = 1 
+
+qualify row_number() over (partition by icm.cust_id, icm.cust_line_seq_id, icm.call_answer_dt, u.acss_user_id order by  icm.cust_id, icm.cust_line_seq_id, icm.call_answer_dt, u.acss_user_id) = 1
+
+) with data
+primary index(cust_id, cust_line_seq_id, acss_user_id)
+on commit preserve rows;
+
+/************************************************************************************************/
+CREATE MULTISET VOLATILE TABLE ICM_EMH_LOB_V , NO LOG AS
+(select
+b.*,
+L.LOBLABEL,                                                        
+L.SLOBLABE SLOBLABEL,                                                    
+L.DEPARTMENTLABEL,        
+ls.functiondesc,
+ls.eccrdeptlabel  
+
+from icm_emh_v as b
+
+left join NTL_PRD_ALLVM.LINE_OF_BUSINESS_V as l
+on b.lobkey = l.lobkey
+
+left join ntl_prd_qmtbls.CAM518_CS_LOB_REF as ls
+on l.loblabel = ls.loblabel
+
+) with data
+primary index(cust_id, cust_line_seq_id, acss_user_id)
+on commit preserve rows;
+
+/************************************************************************************************/
+CREATE MULTISET VOLATILE TABLE mvd_reporting_emh , NO LOG AS
+
+(Select
+/************************/
+a.Field1,  
+a.rpt_mnth,
+a.acss_call_dt,
+a.center_area_desc,
+a.center,
+a.cust_area_desc,
+a.cust_region_desc,
+a.employee_nm,
+a.acss_user_id,
+a.acss_dept_desc,
+a.mgr_2,
+a.mgr_1,
+a.mtn,
+a.LOB_LABEL,
+a.cust_id,
+case when a.mvd_status = 'NON_CAPABLE' and  a.total_mvd_sessions >= '1' 
+then 'Unknown_Device' else a.cust_device 
+end as cust_device,
+case when a.mvd_status = 'NON_CAPABLE' and a.total_mvd_sessions >= '1' 
+then  'MVD_CAPABLE' ELSE a.mvd_status 
+end as mvd_status,
+case when a.mvd_status = 'NON_CAPABLE' and a.total_mvd_sessions >= '1' then 'Unknown'
+else a.device_tier end as device_tier,
+case when a.mvd_status = 'NON_CAPABLE' and a.total_mvd_sessions >= '1' then 'Unknown'
+else a.data_tier end as data_tier,
+a.calldatetime_et,
+a.AHT,
+a.total_count,
+/******************************/
+a.Field2,
+a.total_mvd_sessions,
+a.AHT_Count_Mvd,
+a.mvd_aht,
+/*****************************/
+a.Field3,
+a.CustAreaDesc,
+a.CustRegionDesc,
+a.clnr_qty,
+a.pymnt_dt,
+a.orderdatetime,
+a.prod_nm,
+a.Mvd_N_Clnr
+
+from (select
+'Rep_n_Cust_Base' as Field1,  
+a.rpt_mnth,
+a.acss_call_dt,
+a.center_area_desc,
+a.acss_call_ctr_desc as center,
+a.area_desc as cust_area_desc,
+a.region_desc as cust_region_desc,
+a.employee_nm,
+a.acss_user_id,
+a.acss_dept_desc,
+a.mgr_2,
+a.mgr_1,
+a.mtn,
+coalesce(icm.LOBLABEL, 'Unknown_LOBLABEL') as LOB_LABEL,
+a.cust_id,
+a.cust_device, 
+CASE  WHEN dev.prod_nm IS NOT NULL THEN 'MVD_CAPABLE'
+WHEN a.eqp_device_id = b.eqp_device_id then 'MVD_CAPABLE'
+WHEN cust_device IN 'All New HTC One Glacial Silver'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'All New HTC One Amber Gold'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'ALL NEW HTC One Glamour Red'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN  'All New HTC One Metal Gray'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN  'HTC DROID Incredible 2'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'HTC Rezound'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'HTC Thunderbolt ADR6400L LTE'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'LG Enact'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'LG G2'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'LG G2 White'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'LG Lucid'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'LG Lucid 2'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'LG Spectrum'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'LG Spectrum 2'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola Droid 4'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola Droid Bionic' THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola DROID RAZR'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola DROID RAZR Blue-16GB'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola DROID RAZR Maxx'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola DROID RAZR White'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Samsung Galaxy Tab 2 7.0'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'IPAD 4G 16GB WHITE'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola Droid Xyboard 8.2 16GB'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Samsung Galaxy Note Pro Tablet'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Samsung Galaxy Note 10.1 2014'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola DROID RAZR Cranberry'  THEN  'MVD_CAPABLE'
+WHEN cust_device IN 'Motorola DROID RAZR Purple'  THEN  'MVD_CAPABLE'
+ELSE 'NON_CAPABLE' END AS mvd_status,
+a.device_tier,
+a.data_tier,
+a.calldatetime_et,
+case when icm.aht is not null or a.aht is not null then '1' 
+else '0' end as AHT_Count_Org,
+coalesce(icm.aht, a.aht) as AHT,
+'1' as total_count,
+/******************************/
+'MVD_Data' as Field2,
+coalesce(b.total_mvd_sessions, '0') as total_mvd_sessions,
+case when icm1.aht is not null or b.mvd_aht is not null then '1' 
+else '0' end as AHT_Count_Mvd,
+coalesce(icm1.aht, b.mvd_aht) as mvd_aht,
+/*****************************/
+'CLNR_Data' as Field3,
+coalesce(c.cust_area_desc, 'n/a') as CustAreaDesc,
+coalesce(c.cust_region_desc, 'n/a') as CustRegionDesc,
+coalesce(c.sold_qty, '0') as clnr_qty,
+coalesce(cast(cast(c.pymnt_dt as format 'mm/dd/yyyy') as char(10)), 'n/a') as pymnt_dt,
+coalesce(cast(cast(c.OrderDateTime_ETAdjusted as format 'MM/DD/YYYYBHH:MI:SS') as char(20)),'n/a') as orderdatetime,
+coalesce(c.prod_nm,'n/a') as prod_nm,
+case when b.cust_id = c.cust_id and b.cust_line_seq_id = c.cust_line_seq_id and b.mvmd_diag_dt = c.pymnt_dt and b.nt_user_id = c.acss_user_id then '1'
+else '0' end as Mvd_N_Clnr
+
+from Rep_Cust_Base2 as a
+
+left join MVD_User_Data_EMH as b
+on a.cust_id = b.cust_id
+and a.cust_line_seq_id = b.cust_line_seq_id
+and a.acss_call_dt = b.mvmd_diag_dt
+and a.acss_user_id = b.nt_user_id
+
+left join  clnr_trans_EH  as c
+on a.cust_id = c.cust_id
+and a.cust_line_seq_id = c.cust_line_seq_id
+and a.acss_call_dt = c.pymnt_dt
+and a.acss_user_id = c.acss_user_id
+
+Left join ICM_EMH_LOB_V as icm
+on a.cust_id = icm.cust_id
+and a.cust_line_seq_id = icm.cust_line_seq_id
+and a.acss_call_dt = icm.call_answer_dt
+and a.acss_user_id = icm.acss_user_id
+
+Left join ICM_EMH_LOB_V as icm1
+on b.cust_id = icm1.cust_id
+and b.cust_line_seq_id = icm1.cust_line_seq_id
+and b.mvmd_diag_dt = icm1.call_answer_dt
+and  b.nt_user_id = icm1.acss_user_id
+
+left join MVD_Capable_Devices_EMH as eqp
+on a.cust_device = eqp.prod_nm
+
+LEFT JOIN  MVD_Capable_Devices_EMH AS DEV
+ON a.cust_device = dev.prod_nm 
+
+) as a
+
+) with data
+primary index(acss_call_dt, acss_user_id, mtn, cust_id, pymnt_dt)
+on commit preserve rows;
+
+/**************This removes the current month data so you can load new data*******/
+
+delete from ntl_prd_qmtbls.mvd_reporting_emh_v
+where rpt_mnth = '2015-02-01'
+/**********************************************************************************************/
+insert into  ntl_prd_qmtbls.mvd_reporting_emh_v
+
+select *
+
+from  mvd_reporting_emh;
+
+/*************************This is what you will run to get the weekly date*************/
+select *
+
+from ntl_prd_qmtbls.mvd_reporting_emh_v;
+
+/*************This is a test Script to see the totalvol and min and max dates*********/
+
+select 'Current Month' as RptType, min(acss_call_dt), max(acss_call_dt),
+count(*) totalvol
+
+from ntl_prd_qmtbls.mvd_reporting_emh_v
+
+where rpt_mnth = '?mth_current'
+
+union
+
+select 'Month Run' as RptType,min(acss_call_dt), max(acss_call_dt),
+count(*) totalvol
+
+from ntl_prd_qmtbls.mvd_reporting_emh_v;
