@@ -1,0 +1,43 @@
+SEL
+mkt.region_desc AS "Region"   
+,CASE WHEN mkt.managed_ind = 'u' THEN 'N' ELSE 'Y' END AS "Mgd Mkt"
+,CASE WHEN sdct.sls_dist_chnl_grp_cd = 'd' THEN 'Direct' WHEN sdct.sls_dist_chnl_grp_cd = 'i' THEN 'Indirect' WHEN sdct.sls_dist_chnl_grp_cd = 'u' THEN 'Non-Comm' ELSE 'Unk' END AS "Dist"
+,sdct.sls_dist_chnl_churn_ctgry AS "Channel"
+,COALESCE(CASE WHEN outlet.sls_dist_chnl_type_cd = 'm' THEN CASE WHEN sm.region_cd = mkt.region_cd THEN outlet.district_cd ELSE '-' END ELSE '-' END,'-') AS "District"
+,COALESCE(outlet.store_type_ind,agref.master_agent_desc,outlet.master_agent_id,'-') AS "Loc Type" 
+,CASE WHEN sm.region_cd = mkt.region_cd THEN outlet.sls_outlet_id ELSE '-' END AS "Outlet"
+,CASE WHEN sm.region_cd = mkt.region_cd THEN COALESCE(outlet.loc_store_nm,outlet.sls_outlet_nm) ELSE '-' END AS "Name"
+,syscal.calendar_date (FORMAT 'YYYY') (CHAR(4)) "Year"
+,'Q'|| CAST(syscal.quarter_of_year AS CHAR (1)) AS "Qtr"
+,syscal.calendar_date-(EXTRACT(DAY FROM syscal.calendar_date)-1) AS "Mth"
+,SUM(CASE WHEN nps_score IN ('9','10') THEN 1 ELSE 0 END)  AS "Promoters"
+,SUM(CASE WHEN nps_score IN ('7','8') THEN 1 ELSE 0 END)  AS "Passives"
+,SUM(CASE WHEN nps_score <=6 THEN 1 ELSE 0 END) AS "Detractors"
+,COUNT(resp.survey_id) AS "Surveys"
+
+FROM ntl_prd_allvm.touchpoint_nps_resp_v resp
+LEFT JOIN ntl_prd_allvm.outlet_v outlet ON 
+     resp.sor_id = outlet.sor_id 
+     AND resp.sls_outlet_id = outlet.sls_outlet_id
+LEFT JOIN ntl_prd_allvm.sales_dist_channel_type_v sdct ON 
+     outlet.sor_id = sdct.sor_id 
+     AND outlet.sls_dist_chnl_type_cd = sdct.sls_dist_chnl_type_cd
+LEFT OUTER JOIN ntl_prd_allvm.master_agents_xref_v agref ON 
+     outlet.master_agent_id = agref.master_agent_id 
+     AND outlet.master_agent_area_cd = agref.master_agent_area_cd /* this is the new master agent identifier piece */
+LEFT JOIN ntl_prd_allvm.market_v mkt ON 
+     outlet.sor_id = mkt.sor_id AND outlet.sls_outlet_mkt_cd = mkt.mkt_cd
+LEFT JOIN ntl_prd_allvm.market_v sm ON 
+     outlet.sor_id = sm.sor_id 
+     AND outlet.sls_outlet_mkt_cd = sm.mkt_cd 
+JOIN sys_calendar.calendar syscal ON 
+     resp.survey_dt = syscal.calendar_date
+
+WHERE
+syscal.calendar_date BETWEEN 1090901 AND 1090930 --timeframe
+AND mkt.area_cd ='xx'
+AND sdct.sls_dist_chnl_grp_cd<>'i'
+AND resp.sor_id <>'e' /* remove to include AllTel activity */
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11
+
+
