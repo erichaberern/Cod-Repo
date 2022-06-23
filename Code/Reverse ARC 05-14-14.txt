@@ -1,0 +1,575 @@
+CREATE VOLATILE TABLE EMH_Calls 
+AS(SELECT
+a.sor_id
+,a.mtn
+,a.cust_id
+,a.cust_line_seq_id
+,CASE WHEN cc.acss_call_ctr_desc IN ('NE Columbia SC 2', 'NE Columbia SC') THEN 'NE Columbia' 
+ELSE cc.acss_call_ctr_desc END AS Center 
+,a.acss_user_id 
+,ad.acss_dept_desc 
+,a.acss_call_dt 
+,a.acss_call_id 
+,a.acss_call_tm
+,'Y' as included_call
+,case when cc.acss_call_ctr_time_zn = 'CST' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) + interval '1' hour 
+when cc.acss_call_ctr_time_zn = 'CDT' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) + interval '1' hour 
+when cc.acss_call_ctr_time_zn = 'MST' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) + interval '2' hour 
+when cc.acss_call_ctr_time_zn = 'MDT' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) + interval '2' hour 
+when cc.acss_call_ctr_time_zn = 'PST' then cast(a.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) + interval '3' hour 
+when cc.acss_call_ctr_time_zn = 'PDT' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) + interval '3' hour 
+else cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) 
+End As CallDateTime_ETAdjusted 
+
+,case when cc.acss_call_ctr_cd ='22' and a.acss_call_dt between '2013-11-01' and '2014-03-14' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '1' hour 
+when cc.acss_call_ctr_cd in ('47','94') then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '1' hour 
+when cc.acss_call_ctr_time_zn = 'EST' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '3' hour 
+when cc.acss_call_ctr_time_zn = 'EDT' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '3' hour 
+when cc.acss_call_ctr_time_zn = 'CST' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '2' hour 
+when cc.acss_call_ctr_time_zn = 'CDT' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '2' hour 
+when cc.acss_call_ctr_time_zn = 'MST' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '1' hour 
+when cc.acss_call_ctr_time_zn = 'MDT' then cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) - interval '1' hour 
+else cast(A.ACSS_CALL_DT as TimeStamp(6))+ ((a.acss_call_tm - time '00:00:00') hour to second(6)) end ACSS_CALL_TS
+
+,CASE WHEN cc.acss_call_ctr_time_zn LIKE 'M%' THEN a.acss_call_tm - interval '1' hour
+WHEN cc.acss_call_ctr_time_zn LIKE 'C%' THEN a.acss_call_tm - interval '2' hour
+WHEN cc.acss_call_ctr_time_zn LIKE 'E%' THEN a.acss_call_tm - interval '3' hour
+WHEN cc.acss_call_ctr_time_zn LIKE 'H%' THEN a.acss_call_tm + interval '5' hour
+ELSE a.acss_call_tm END acss_call_ad,
+CAST(a.acss_call_dt || ' ' ||
+CAST(acss_call_ad AS CHAR(8)) AS TIMESTAMP(0) ) acss_dt_tm
+
+FROM ntl_prd_allvm.acss_call_v as a
+
+left outer join ntl_prd_qmtbls.mrs_dst as dst
+on a.acss_call_dt = dst.begindate 
+
+INNER JOIN ntl_prd_allvm.acss_call_center_v AS cc 
+ON a.acss_call_ctr_cd = cc.acss_call_ctr_cd 
+
+INNER JOIN ntl_prd_allvm.acss_dept_v AS ad 
+ON a.acss_dept_id = ad.acss_dept_id
+
+LEFT JOIN(SELECT acss_call_dt,acss_call_ctr_cd, acss_dept_id 
+FROM acss_call_v
+WHERE acss_call_dt > (DATE-200)
+AND acss_call_type_cd = '1' 
+GROUP BY 1,2,3
+) as r 
+
+ON a.acss_call_dt = r.acss_call_dt
+AND a.acss_call_ctr_cd = r.acss_call_ctr_cd
+AND a.acss_dept_id = r.acss_dept_id
+
+
+WHERE 
+a.sor_id = 'v' 
+AND a.cust_line_seq_id IS NOT NULL 
+AND a.acss_call_dt > (DATE-200)
+AND ((a.acss_call_type_cd IN ('1','7','8')) OR (a.acss_call_type_cd = '3' 
+AND cc.acss_call_ctr_type = 'O' 
+AND ad.acss_dept_desc NOT LIKE '%offline%' 
+AND R.acss_dept_id IS NULL )) 
+AND a.ACSS_DEPT_ID IN ('225','155','156','199','311','72','117','158','78','299','10','207',
+'142','313','321','322','309','229','310','221','51','277','3','55','150','83','151','132','82','166',
+'148','318','317','136','264','170','203','290','209','179')
+
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14
+
+) 
+WITH DATA 
+PRIMARY INDEX (cust_id, cust_line_seq_id, acss_call_id, acss_call_dt, acss_call_tm) 
+ON COMMIT PRESERVE ROWS;
+
+
+
+
+/*STEP 1 - FIND ALL OF THE ACCOUNTS (CUST_ID LEVEL) THAT HAVE BEEN ACCESSED BY RETAIL DURING A CALENDAR MONTH. THE MINIMUM TRANSACTION TIME IS USED TO DETERMINE THE INITIAL LOOKUP PER DAY*/
+--DROP TABLE RETAIL_POS_TRANS;
+CREATE VOLATILE TABLE RETAIL_POS_TRANS
+AS (SELECT
+M.AREA_DESC AREA
+, M.REGION_DESC REGION
+, P.STORE_NUM
+, O.DISTRICT_CD
+, O.SLS_OUTLET_NM STORE_NAME
+, P.CUST_ID
+, P.TRANS_DT
+, MIN(P.TRANS_TM) TRANS_TIME
+
+FROM NTL_PRD_ALLVM.POS_SCREEN_USAGE_V P
+JOIN NTL_PRD_ALLVM.NETACE_OUTLET_XREF_V X
+ON P.STORE_NUM = X.STORE_NUM
+AND P.SOR_ID = X.SOR_ID
+
+JOIN NTL_PRD_ALLVM.OUTLET_V O
+ON O.SLS_OUTLET_ID = X.SLS_OUTLET_ID
+AND O.SOR_ID = X.SOR_ID
+
+JOIN NTL_PRD_ALLVM.MARKET_V M
+ON O.SLS_OUTLET_MKT_CD = M.MKT_CD
+
+LEFT JOIN NTL_PRD_ALLVM.CUST_ECPD_V CE
+ON P.SOR_ID = CE.SOR_ID
+AND P.CUST_ID = CE.CUST_ID
+AND P.TRANS_DT BETWEEN CE.ECPD_EFF_DT AND (COALESCE(ECPD_TERM_DT,DATE))
+
+LEFT JOIN NTL_PRD_ALLVM.ECPD_PROFILE_V EP
+ON CE.ECPD_LIABILITY_TYPE_CD = EP.ECPD_LIABILITY_TYPE_CD
+AND CE.ECPD_PROFILE_ID = EP.ECPD_PROFILE_ID
+AND EP.ECPD_PROFILE_TYPE_CD = 'National Acct Corporate'
+
+WHERE (P.TRANS_DT >= '2014-04-01' AND P.TRANS_DT <= '2014-04-30')
+AND M.AREA_DESC = 'Northeast'
+AND O.SLS_DIST_CHNL_TYPE_CD = 'M'
+AND EP.ECPD_PROFILE_ID IS NULL
+GROUP BY 1,2,3,4,5,6,7 )WITH DATA
+
+PRIMARY INDEX (STORE_NUM, CUST_ID, TRANS_DT, TRANS_TIME) ON COMMIT PRESERVE ROWS;
+
+
+/*STEP 2 - FIND THE NET ACE USER ID THAT WAS ASSOCIATED WITH THE INITIAL ACCOUNT LOOKUP PER DAY*/
+--DROP TABLE RETAIL_POS_TRANS2;
+CREATE VOLATILE TABLE RETAIL_POS_TRANS2
+AS (
+SELECT M.AREA
+, M.REGION
+, M.DISTRICT_CD
+, M.STORE_NUM, M.STORE_NAME
+, M.CUST_ID, M.TRANS_DT
+, M.TRANS_TIME
+, P.NETACE_USER_ID
+, NU.NETACE_USER_NM
+FROM RETAIL_POS_TRANS M
+
+JOIN NTL_PRD_ALLVM.POS_SCREEN_USAGE_V P
+ON M.STORE_NUM = P.STORE_NUM
+AND M.CUST_ID = P.CUST_ID
+AND M.TRANS_DT = P.TRANS_DT
+AND M.TRANS_TIME = P.TRANS_TM
+
+LEFT JOIN NTL_PRD_ALLVM.NETACE_USER_ID_V NU
+ON P.NETACE_USER_ID = NU.NETACE_USER_ID
+
+)WITH DATA
+PRIMARY INDEX (AREA, REGION, DISTRICT_CD, STORE_NUM, CUST_ID, TRANS_DT, TRANS_TIME, NETACE_USER_ID)
+ON COMMIT PRESERVE ROWS;
+
+/*STEP 3 - THE STORE TRANSACTION TIME IS TRANSLATED TO PACIFIC TIME BASED ON THE TIME ZONE ASSOCIATED WITH THE RETAIL STORE. TIME ZONE IS FOUND THROUGH STORE LOCATION ZIP CODE.*/
+--DROP TABLE RETAIL_POS_TRANS3;
+CREATE VOLATILE TABLE RETAIL_POS_TRANS3
+AS (
+SELECT M.AREA
+, M.REGION
+, M.DISTRICT_CD
+, M.STORE_NUM
+, M.STORE_NAME
+, M.CUST_ID
+, M.TRANS_DT
+, M.NETACE_USER_ID
+, M.NETACE_USER_NM
+, CASE
+WHEN O.TIME_ZONE = 'CENTRAL' THEN M.TRANS_TIME - INTERVAL '2' HOUR
+WHEN O.TIME_ZONE = 'MOUNTAIN' THEN M.TRANS_TIME - INTERVAL '1' HOUR
+WHEN O.TIME_ZONE = 'EASTERN' THEN M.TRANS_TIME - INTERVAL '3' HOUR
+WHEN O.TIME_ZONE = 'HAWAII' THEN M.TRANS_TIME + INTERVAL '3' HOUR
+ELSE M.TRANS_TIME END TRANS_TIME_PST
+
+FROM RETAIL_POS_TRANS2 M
+JOIN NTL_PRD_ALLVM.NETACE_OUTLET_XREF_V X
+ON M.STORE_NUM = X.STORE_NUM
+JOIN ( SELECT O.SOR_ID
+, O.SLS_OUTLET_MKT_CD
+, O.DISTRICT_CD
+, O.SLS_OUTLET_ID
+, O.SLS_OUTLET_NM
+, CASE
+WHEN O.STATE_CD = 'AZ' THEN 'ARIZONA'
+WHEN O.STATE_CD = 'HI' THEN 'HAWAII'
+ELSE Z.TM_ZONE END TIME_ZONE
+FROM NTL_PRD_ALLVM.OUTLET_V O
+LEFT JOIN NTL_PRD_ALLVM.ZIP_V Z
+ON O.ZIP5_CD = Z.ZIP5_CD
+WHERE SLS_DIST_CHNL_TYPE_CD = 'M' AND STORE_OPEN_DT IS NOT NULL AND STORE_CLOSE_DT IS NULL) O
+ON O.SLS_OUTLET_ID = X.SLS_OUTLET_ID
+
+)WITH DATA
+PRIMARY INDEX (AREA, REGION, DISTRICT_CD, STORE_NUM, CUST_ID, TRANS_DT, NETACE_USER_ID, TRANS_TIME_PST)
+ON COMMIT PRESERVE ROWS;
+
+/*STEP 4 - TYPE 1 & 7 CALLS ARE IDENTIFIED THAT TOOK PLACE WITHIN THE TIME PERIOD OF THE RETAIL TRANSACTION DATE AND 2 DAYS AFTER THE RETAIL TRANSACTION DATE. THE TIME OF THE CALL IS ADJUSTED TO PACIFIC TIME ZONE*/
+--DROP TABLE RETAIL_POS_TRANS_CALLS;
+CREATE VOLATILE TABLE RETAIL_POS_TRANS_CALLS
+AS (
+SELECT A.AREA
+, A.REGION
+, A.DISTRICT_CD
+, A.STORE_NUM
+, A.STORE_NAME
+, A.NETACE_USER_NM
+, A.CUST_ID
+, B.MTN
+, CAST(A.TRANS_DT AS TIMESTAMP(6))+ ((A.TRANS_TIME_PST - TIME '00:00:00') HOUR TO SECOND(6)) TRANS_TS
+, A.TRANS_DT
+, A.TRANS_TIME_PST
+, A.NETACE_USER_ID
+, B.ACSS_CALL_CTR_CD
+, B.ACSS_USER_ID
+, B.ACSS_CALL_TM
+, CASE WHEN C.ACSS_CALL_CTR_TIME_ZN = 'CDT' THEN B.ACSS_CALL_TM - INTERVAL '2' HOUR
+WHEN C.ACSS_CALL_CTR_TIME_ZN = 'MDT' THEN B.ACSS_CALL_TM - INTERVAL '1' HOUR
+WHEN C.ACSS_CALL_CTR_TIME_ZN IN ('EDT','TY') THEN B.ACSS_CALL_TM - INTERVAL '3' HOUR
+WHEN C.ACSS_CALL_CTR_TIME_ZN = 'HST' THEN B.ACSS_CALL_TM + INTERVAL '3' HOUR
+ELSE B.ACSS_CALL_TM END ACSS_CALL_TM_PST
+, B.ACSS_CALL_DT
+, B.ACSS_CALL_TYPE_CD
+, B.ACSS_CALL_ID
+, B.ACSS_DEPT_ID
+
+FROM RETAIL_POS_TRANS3 A
+
+LEFT JOIN NTL_PRD_ALLVM.ACSS_CALL_V B
+ON A.CUST_ID = B.CUST_ID
+AND B.ACSS_CALL_DT BETWEEN A.TRANS_DT AND A.TRANS_DT + INTERVAL '2' DAY
+AND B.ACSS_CALL_TYPE_CD IN ('1','7')
+AND B.ACSS_DEPT_ID IN ('225','155','156','199','311','72','117','158','78','299','10','207',
+'142','313','321','322','309','229','310','221','51','277','3','55','150','83','151','132','82','166',
+'148','318','317','136','264','170','203','290','209','179')
+
+
+LEFT JOIN NTL_PRD_ALLVM.ACSS_CALL_CENTER_V C
+ON B.ACSS_CALL_CTR_CD = C.ACSS_CALL_CTR_CD
+
+)WITH DATA
+PRIMARY INDEX (AREA, REGION, DISTRICT_CD, STORE_NUM, CUST_ID, TRANS_DT, TRANS_TIME_PST, NETACE_USER_ID, ACSS_USER_ID, ACSS_CALL_TM, ACSS_CALL_TM_PST, ACSS_CALL_DT, ACSS_CALL_ID)
+ON COMMIT PRESERVE ROWS;
+
+/*STEP 5 - THE PACIFIC TIME OF THE CALL TO CS IS COMPARED TO THE PACIFIC TIME OF THE RETAIL TRANSACTION TO DETERMINE WHICH CAME FIRST*/
+--DROP TABLE RETAIL_POS_TRANS_CALLS2;
+CREATE VOLATILE TABLE RETAIL_POS_TRANS_CALLS2
+AS (
+SELECT A.AREA
+, A.REGION
+, A.DISTRICT_CD
+, A.STORE_NUM
+, A.STORE_NAME
+, A.CUST_ID
+, A.MTN
+, A.TRANS_DT
+, A.TRANS_TIME_PST
+, A.TRANS_TS
+, A.NETACE_USER_ID
+, A.NETACE_USER_NM
+, A.ACSS_CALL_CTR_CD
+, A.ACSS_USER_ID
+, A.ACSS_CALL_TM_PST
+, A.ACSS_CALL_DT
+, A.ACSS_CALL_TYPE_CD
+, A.ACSS_CALL_ID
+, A.ACSS_DEPT_ID
+, CAST(A.ACSS_CALL_DT AS TIMESTAMP(6))+ ((A.ACSS_CALL_TM_PST - TIME '00:00:00') HOUR TO SECOND(6)) ACSS_CALL_TS
+
+FROM RETAIL_POS_TRANS_CALLS A
+
+WHERE (CAST(A.ACSS_CALL_DT AS TIMESTAMP(6))+ ((A.ACSS_CALL_TM_PST - TIME '00:00:00') HOUR TO SECOND(6)) >= A.TRANS_TS OR ACSS_CALL_DT IS NULL)
+
+)WITH DATA
+PRIMARY INDEX (CUST_ID, ACSS_CALL_TS)
+ON COMMIT PRESERVE ROWS;
+
+--STEP 6 - OC&C TRANSACTION AT MTN LEVEL AND ACCOUNT LEVEL ARE COMPILED ON THE CUSTOMERS WHO CALLED INTO CS.
+--DROP TABLE RETAIL_POS_TRANS_CALLS_OCC;
+CREATE VOLATILE TABLE RETAIL_POS_TRANS_CALLS_OCC
+AS (
+SELECT MOT.TRANS_SEQ_ID
+, MOT.CUST_ID
+, MOT.OCC_CD
+, OCC.OCC_DESC
+, MOT.TRANS_DT
+, MOT.OCC_REAS_CD
+, ORV.OCC_REAS_DESC
+, MOT.USER_ID
+, COALESCE(MOT.APPROVER_ID, MOT.USER_ID) APPROVER
+, MOT.OCC_AMT
+
+FROM NTL_PRD_ALLVM.MTN_OCC_TRANS_V AS MOT
+
+JOIN RETAIL_POS_TRANS_CALLS RPT
+ON MOT.CUST_ID = RPT.CUST_ID
+AND MOT.TRANS_DT = RPT.ACSS_CALL_DT
+AND MOT.USER_ID = RPT.ACSS_USER_ID
+
+LEFT JOIN NTL_PRD_ALLVM.CUST_ACCT_V AS CAV
+ON MOT.SOR_ID = CAV.SOR_ID
+AND MOT.MKT_CD = CAV.MKT_CD
+AND MOT.CUST_ID = CAV.CUST_ID
+AND MOT.ACCT_NUM = CAV.ACCT_NUM
+
+JOIN NTL_PRD_ALLVM.OCC_V AS OCC
+ON MOT.OCC_CD = OCC.OCC_CD
+
+JOIN NTL_PRD_ALLVM.OCC_REASON_V ORV
+ON MOT.OCC_REAS_CD = ORV.OCC_REAS_CD
+
+JOIN NTL_PRD_ALLVM.ACSS_USER_V AS AU
+ON COALESCE(MOT.APPROVER_ID, MOT.USER_ID) = AU.ACSS_USER_ID
+
+WHERE MOT.OCC_STATUS_CD = 'A'
+AND MOT.USER_GENERATED = 'Y'
+AND MOT.OCC_REAS_CD <> 'SB'
+
+UNION
+
+SELECT CAO.TRANS_SEQ_ID
+, CAO.CUST_ID
+, CAO.OCC_CD
+, OCC.OCC_DESC
+, CAO.TRANS_DT
+, CAO.OCC_REAS_CD
+, ORV.OCC_REAS_DESC
+, CAO.USER_ID
+, COALESCE(CAO.APPROVER_ID, CAO.USER_ID) APPROVER
+, CAO.OCC_AMT
+
+FROM NTL_PRD_ALLVM.CUST_ACCT_OCC_TRANS_V AS CAO
+
+JOIN RETAIL_POS_TRANS_CALLS RPT
+ON CAO.CUST_ID = RPT.CUST_ID
+AND CAO.TRANS_DT = RPT.ACSS_CALL_DT
+AND CAO.USER_ID = RPT.ACSS_USER_ID
+
+LEFT JOIN NTL_PRD_ALLVM.CUST_ACCT_V AS CAV
+ON CAO.SOR_ID = CAV.SOR_ID
+AND CAO.MKT_CD = CAV.MKT_CD
+AND CAO.CUST_ID = CAV.CUST_ID
+AND CAO.ACCT_NUM = CAV.ACCT_NUM
+
+JOIN NTL_PRD_ALLVM.OCC_V AS OCC
+ON CAO.OCC_CD = OCC.OCC_CD
+
+JOIN NTL_PRD_ALLVM.OCC_REASON_V ORV
+ON CAO.OCC_REAS_CD = ORV.OCC_REAS_CD
+
+JOIN NTL_PRD_ALLVM.ACSS_USER_V AS AU
+ON COALESCE(CAO.APPROVER_ID, CAO.USER_ID) = AU.ACSS_USER_ID
+
+WHERE CAO.OCC_STATUS_CD = 'A'
+AND CAO.USER_GENERATED = 'Y'
+AND CAO.OCC_REAS_CD <> 'SB'
+
+)WITH DATA
+PRIMARY INDEX (TRANS_SEQ_ID)
+ON COMMIT PRESERVE ROWS;
+
+CREATE VOLATILE TABLE RETAIL_TRANS_PREV
+AS (select A.AREA
+, A.REGION
+, A.DISTRICT_CD
+, A.STORE_NUM
+, A.STORE_NAME
+, A.CUST_ID
+, A.TRANS_DT
+, A.TRANS_TIME_PST
+, A.TRANS_TS
+, A.NETACE_USER_ID
+, A.NETACE_USER_NM
+
+FROM RETAIL_POS_TRANS_CALLS2 as a
+
+
+qualify row_number() over (partition by a.cust_id, A.TRANS_TS, a.netace_user_id order by a.cust_id, A.TRANS_TS) = 1
+
+)WITH DATA
+PRIMARY INDEX (CUST_ID,TRANS_DT,TRANS_TS,NETACE_USER_ID)
+ON COMMIT PRESERVE ROWS;
+
+CREATE VOLATILE TABLE RETAIL_TRANS_PREV_CALLS
+AS (select
+(acall.acss_call_dt - rtp.trans_dt) as call_period, 
+rtp.area,
+rtp.region,
+store_name,
+acall.mtn,
+rtp.cust_id,
+rtp.trans_dt,
+rtp.trans_time_pst,
+rtp.trans_ts,
+rtp.netace_user_nm,
+rtp.netace_user_id,
+acall.included_call,
+acall.acss_call_tm,
+acall.ACSS_CALL_TS,
+acall.acss_call_dt,
+acall.acss_call_id,
+count(Distinct(acall.acss_call_id)) as prev_calls
+
+from RETAIL_TRANS_PREV as rtp
+
+left join EMH_Calls as acall
+on rtp.cust_id = acall.cust_id
+and acall.acss_call_ts <= rtp.trans_ts
+and acall.acss_call_dt between rtp.trans_dt -2 and rtp.trans_dt
+
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
+
+)WITH DATA
+PRIMARY INDEX (CUST_ID,TRANS_DT,TRANS_TS,ACSS_CALL_TS, acss_call_dt, acss_call_id)
+ON COMMIT PRESERVE ROWS;
+
+SELECT 
+A.AREA
+, A.REGION
+, A.DISTRICT_CD
+, A.STORE_NAME
+, A.NETACE_USER_NM
+,a.NETACE_USER_ID
+,'RETAIL' SLS_DIST_CHNL_TYPE
+, A.TRANS_DT (FORMAT 'YYYY-MM') (CHAR(7)) RPT_MTH
+, COUNT(DISTINCT A.CUST_ID||A.TRANS_DT) ACCOUNTS
+,count(Distinct(acall.acss_call_id)) as prev_calls 
+, COUNT(DISTINCT A.ACSS_CALL_ID) CALLS
+, COALESCE(SUM(B.OCC_AMT),0) OCC
+, CAST(CURRENT_DATE AS TIMESTAMP(0)) + ((CURRENT_TIME - TIME '00:00:00') HOUR TO SECOND(0)) INSERT_DT
+
+
+select 
+
+--(cbase2.acss_tm_estadjusted - cbase2.tm_estadjusted) as time_diff,
+--case when cbase2.call_period=0 and time_diff < 0 then 'N' else 'Y' end as included_call,
+--count(distinct case when ns.included_call='Y' then ns.cust_id || ns.cust_line_seq_id end) as did_call,
+/**(acall.acss_call_dt - a.trans_dt) as call_period, 
+a.area,
+a.region,
+a.store_name,
+a.mtn,
+a.trans_dt,
+a.trans_time_pst,
+a.netace_user_nm,
+a.acss_user_id,
+a.acss_call_tm_pst,
+a.acss_call_id,**/
+a.*,
+acall.*
+
+FROM RETAIL_POS_TRANS_CALLS2 as A
+
+
+LEFT outer JOIN RETAIL_POS_TRANS_CALLS_OCC as B
+ON A.CUST_ID = B.CUST_ID
+AND A.TRANS_DT = B.TRANS_DT
+AND A.ACSS_USER_ID = B.USER_ID
+
+LEFT JOIN RETAIL_TRANS_PREV_CALLS as acall
+on a.cust_id = acall.cust_id
+and a.trans_dt = acall.trans_dt
+and a.trans_ts = acall.trans_ts
+and a.netace_user_id = acall.netace_user_id
+
+
+--and acall.acss_call_dt between a.trans_dt -2 and a.trans_dt
+
+where a.cust_id in ('886151451',
+'886151451')
+
+
+
+--and a.mtn = '4102417863'
+
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14
+
+order by a.cust_id asc
+
+---GROUP BY 1,2,3,4,5,6,7,8;
+
+select top 100 *
+
+from EMH_Calls;
+
+select top 100 *
+
+FROM RETAIL_POS_TRANS_CALLS2;
+
+select 
+
+--(cbase2.acss_tm_estadjusted - cbase2.tm_estadjusted) as time_diff,
+--case when cbase2.call_period=0 and time_diff < 0 then 'N' else 'Y' end as included_call,
+--count(distinct case when ns.included_call='Y' then ns.cust_id || ns.cust_line_seq_id end) as did_call,
+/**(acall.acss_call_dt - a.trans_dt) as call_period, 
+a.area,
+a.region,
+a.store_name,
+a.mtn,
+a.trans_dt,
+a.trans_time_pst,
+a.netace_user_nm,
+a.acss_user_id,
+a.acss_call_tm_pst,
+a.acss_call_id,**/
+a.*,
+acall.*,
+case when acall.acss_call_id is not null then 'Yes'
+else 'No' END as test1,
+case when a.mtn is not null then 'Yes' else 'No' END AS test2
+
+FROM RETAIL_POS_TRANS_CALLS2 as A
+
+LEFT outer JOIN RETAIL_POS_TRANS_CALLS_OCC as B
+ON A.CUST_ID = B.CUST_ID
+AND A.TRANS_DT = B.TRANS_DT
+AND A.ACSS_USER_ID = B.USER_ID
+
+LEFT JOIN RETAIL_TRANS_PREV_CALLS as acall
+on a.cust_id = acall.cust_id
+and a.trans_dt = acall.trans_dt
+and a.netace_user_id = acall.netace_user_id
+and a.acss_call_id <> acall.acss_call_id
+
+
+--and acall.acss_call_dt between a.trans_dt -2 and a.trans_dt
+
+where a.netace_user_id = 'dalyian'
+and a.acss_call_id = '713046635'
+
+
+SELECT 
+A.AREA
+, A.REGION
+, A.DISTRICT_CD
+, A.STORE_NAME
+, A.NETACE_USER_NM
+,a.NETACE_USER_ID
+,'RETAIL' SLS_DIST_CHNL_TYPE
+, A.TRANS_DT (FORMAT 'YYYY-MM') (CHAR(7)) RPT_MTH
+, COUNT(DISTINCT A.CUST_ID||A.TRANS_DT) ACCOUNTS
+,count(distinct(dc.acss_call_id)) as DidCall
+,count(Distinct(acall.acss_call_id)) as prevs_call 
+, COUNT(DISTINCT A.ACSS_CALL_ID) CALLS
+, COALESCE(SUM(B.OCC_AMT),0) OCC
+, CAST(CURRENT_DATE AS TIMESTAMP(0)) + ((CURRENT_TIME - TIME '00:00:00') HOUR TO SECOND(0)) INSERT_DT
+
+FROM RETAIL_POS_TRANS_CALLS2 as A
+
+LEFT outer JOIN RETAIL_POS_TRANS_CALLS_OCC as B
+ON A.CUST_ID = B.CUST_ID
+AND A.TRANS_DT = B.TRANS_DT
+AND A.ACSS_USER_ID = B.USER_ID
+
+LEFT JOIN RETAIL_TRANS_PREV_CALLS as acall
+on a.cust_id = acall.cust_id
+and a.trans_dt = acall.trans_dt
+and a.netace_user_id = acall.netace_user_id
+and a.acss_call_id <> acall.acss_call_id
+
+left join (select a.* 
+from RETAIL_TRANS_PREV_CALLS as a
+where acss_call_id is not null 
+qualify row_number() over (partition by cust_id order by cust_id, acss_call_dt, acss_call_tm) = 1
+) as dc
+on acall.cust_id = dc.cust_id
+and acall.acss_call_dt = dc.acss_call_dt
+and acall.acss_call_id = dc.acss_call_id
+
+where a.netace_user_id = 'herma23'
+--and a.acss_call_id = '713046635'
+
+group by 1,2,3,4,5,6,7,8
