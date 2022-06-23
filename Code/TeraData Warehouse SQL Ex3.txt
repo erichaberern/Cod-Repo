@@ -1,0 +1,462 @@
+ --This table creates the LOB and SLOB down to the acss_call_id
+  
+	create volatile table icm_base
+    as
+    (select
+		call_answer_dt - extract(day from i.call_answer_dt) + 1 as reportmonth,
+		
+		call_answer_dt,
+		
+        case when lob.sloblabe is null then 'unknown-slob' 
+
+            else lob.sloblabe end as slob_nm,
+
+        case when lob.loblabel is null then 'unknown-lob' 
+
+            else lob.loblabel end as lob_nm,
+
+		acss_call_id as icm_acss_call_id
+
+	from ntl_prd_allvm.icm_summary_fact_v as i
+	
+	join ntl_prd_allvm.eccr_center_v as ec 
+	on ec.callcenterid= i.callcenterid
+	
+	join ntl_prd_allvm.eccr_bus_rule_map_v as br 
+	on br.bus_rule=i.bus_rule
+	
+	join ntl_prd_allvm.line_of_business_v as lob 
+	on lob.lobkey=br.lobkey 
+	and i.call_end_dt >= br.eff_dt 
+	and i.call_end_dt <= br.end_dt
+
+	where
+	call_answer_dt between '2016-10-01' and date - 35
+	
+	and ( case when acss_call_id is null and ivr_call_id is not null then '0'
+	
+	        when ivr_call_id is null and acss_call_id is null then '1' else '2' end ) not in ('0','1')
+
+  qualify row_number() over (partition by acss_call_id, call_answer_dt order by call_end_tm, call_answer_dt, ivr_call_id) = 1
+  
+	  ) with data
+    unique primary index(call_answer_dt, icm_acss_call_id)
+    index(call_answer_dt) order by values(call_answer_dt)
+    on commit preserve rows;
+	
+	---------------------------------------------------------------------------------------------------------------------
+    
+    --This table utilizes ndcir_detail_line_v and acss_call_v to create baseline reporting
+
+    create volatile table ndcir_noncomm_base
+    as
+    (
+        select 
+        ndcir.trans_activity_type,
+        ndcir.trans_pymnt_dt,
+        ndcir.invc_dt,
+        ndcir.mtn,
+        ndcir.cust_id as ndcir_cust_id,
+        ndcir.cust_line_seq_id as ndcir_cust_line_seq_id,
+        ndcir.line_type,
+        ndcir.trans_type,
+        coalesce(upper(dm1.mfg_nm||' '||dm1.device_brand_nm),'other') as Prev_Device,
+        coalesce(upper(dm.mfg_nm||' '||dm.device_brand_nm),'other') as Device,
+        ndcir.os_type_prev,
+        ndcir.os_type,
+        ndcir.device_generation_prev||' to '||ndcir.device_generation as Device_gen_Chgn,
+        ndcir.hr_emp_id,
+        ndcir.acss_netace_user_id,
+        ndcir.activation_flag,
+        acv.acss_call_dt,
+        acv.acss_call_id as ndcir_acss_call_id,
+        acv.acd_call_id as ndcir_acd_call_id,
+        acv.ivr_call_id as ndcir_ivr_call_id
+        
+    from ntl_prd_allvm.ndcir_line_detail_v as ndcir
+    
+    inner join ntl_prd_allvm.acss_call_v as acv
+    on ndcir.cust_id = acv.cust_id
+    and ndcir.cust_line_seq_id = acv.cust_line_seq_id
+    and ndcir.acss_netace_user_id = acv.acss_user_id
+    and ndcir.invc_dt = acv.acss_call_dt
+    and acv.acss_call_type_cd not in ('3','4','5')
+    
+    left join ntl_prd_allvm.device_dp_map_v as dm 
+    on ndcir.prod_nm = dm.prod_nm
+    
+    left join ntl_prd_allvm.device_dp_map_v as dm1 
+    on ndcir.prod_nm_prev = dm1.prod_nm
+    
+    where ndcir.sls_dist_chnl_type_cd = 'NC'
+    and ndcir.trans_pymnt_dt between '2016-10-01' and date - 35
+    
+    qualify row_number() over (partition by ndcir.cust_id, ndcir.cust_line_seq_id order by ndcir.cust_id, ndcir.cust_line_seq_id,ndcir.trans_pymnt_dt) = 1
+
+    ) with data
+    unique primary index(ndcir_cust_id, ndcir_cust_line_seq_id, acss_netace_user_id, trans_pymnt_dt)
+    index(trans_pymnt_dt) order by values(trans_pymnt_dt)
+    on commit preserve rows;
+    
+	---------------------------------------------------------------------------------------------------------------------
+
+    --This table creates the baseline data for price plan to match up with Repeats
+    
+    create volatile table priceplan_noncomm_base
+    as
+    (    
+        select
+        ph.trans_dt,  
+        ph.user_id,
+        ph.cust_id as pplan_cust_id,  
+        ph.cust_line_seq_id as pplan_cust_line_seq_id, 
+        pp.pplan_desc,
+        acv.acss_call_ctr_cd,
+        acv.acss_dept_id,
+        acv.acss_call_type_cd,
+        acv.acss_call_id as pplan_acss_call_id,
+        acv.acd_call_id as pplan_acd_call_id,
+        acv.ivr_call_id as pplan_ivr_call_id
+        
+ 
+    from ntl_prd_allvm.dly_line_activity_pplan_v as ph 
+     
+    join ntl_prd_allvm.cust_acct_line_v h 
+    on ph.cust_id = h.cust_id 
+    and ph.cust_line_seq_id = h.cust_line_seq_id 
+     
+    join ntl_prd_allvm.price_plan_v pp  
+    on ph.pplan_cd_curr = pp.pplan_cd 
+    and ph.pplan_mkt_cd_curr = pp.pplan_mkt_cd 
+
+    inner join ntl_prd_allvm.acss_call_v as acv
+    on ph.cust_id = acv.cust_id
+    and ph.cust_line_seq_id = acv.cust_line_seq_id
+    and ph.user_id = acv.acss_user_id
+    and ph.trans_dt = acv.acss_call_dt
+    and acv.acss_call_type_cd not in ('3','4','5')
+ 
+    where ph.sor_id = 'v'  
+    and ph.trans_dt between '2016-10-01' and date - 35
+    and ph.sls_dist_chnl_type_cd = 'NC'
+    and ph.user_id is not null 
+    and ph.activity_cd in ('m','c') 
+    
+    qualify row_number() over (partition by ph.cust_id, ph.cust_line_seq_id order by ph.cust_id, ph.cust_line_seq_id, ph.trans_dt) = 1
+
+    ) with data
+    unique primary index(pplan_cust_id, pplan_cust_line_seq_id, user_id, trans_dt)
+    index(trans_dt) order by values(trans_dt)
+    on commit preserve rows;
+   
+---------------------------------------------------------------------------------------------------------------------
+
+	delete from ntl_prd_qmtbls.tblMTL_Repeat_Resolution_Emp_v
+		where call_month >= '2016-10-01';
+	
+	---------------------------------------------------------------------------------------------------------------------
+
+
+--Final Table that creates the Repeat table with all data sets
+
+    ins into ntl_prd_qmtbls.tblMTL_Repeat_Resolution_Emp_v
+
+    select 
+        call_start_dt-extract(day from call_start_dt)+1 as call_month,
+		
+		coalesce(dp_center_type_label, case when acss_call_ctr_type = 'O' then 'Outsource'
+            
+            when acss_call_ctr_type = 'V' then 'Inhouse' else null end,null) as center_type,
+			
+            coalesce(case when acss_call_ctr_type = 'v' and acss_dept_desc like '%LNP%' then 'LNP' 
+        
+            else (case when field_label like '%Legacy%' 
+            
+                    or field_label like '%Uncategorized%' then field_label_desc 
+                    
+                    else field_label end) end,field_label_desc, 'unknown_field_desc')  as field_label_desc,
+			
+		coalesce(a.Contact_Center,a.acss_call_ctr_desc, 'unknown_center') as acss_call_ctr_desc,
+		
+		coalesce(a.rep_nm,'Unknown') as rep_nm,
+		
+		coalesce(a.sup_nm,'Unknown') as sup_nm,
+		
+		coalesce(a.sr_mgr_nm, 'Unknown') as sr_mgr_nm,
+		
+		a.acss_user_id,
+		
+        a.acss_dept_desc,
+		
+		coalesce(a.lob_nm, 'unknown_lob' ) as lob_nm,
+		
+        coalesce(a.slob_nm,'unknown_slob') as slob_nm,
+		
+		coalesce(a.Device, 'Not Declared') as Device,
+		
+		coalesce(a.os_type, 'Not Declared') as os_type,
+		
+		coalesce(a.Prev_Device, 'Not Declared') as Prev_Device,
+		
+		coalesce(a.os_type_prev,'Not Declared') as os_type_prev,
+		
+		coalesce(a.device_gen_Chgn, 'Not Declared') as device_gen_Chgn,
+		
+        coalesce(a.pplan_desc, 'Not Declared') as pplan_desc,
+		
+		case when a.ndcir_acss_call_id is not null then 'NDCIR_Repeats'
+		
+			when a.pplan_acss_call_id is not null  then 'Price_Plan_Repeats'
+		
+				when acss_call_id is not null then 'Repeats_minus_ppln_n_Ndcir' 
+				
+					else 'Unknown_Repeats' end as Repeat_Type,
+		
+            sum(active_cnt) as totalcalls,    ---This is the new field created to calculate accountable calls
+                                
+            sum(repeat_2_hour) as repeat_2hr_calls,  
+                                        
+            sum(repeat_3_day) as repeat_3day_calls,
+			
+			sum(repeat_31_day) as repeat_31day_calls
+        
+        from (
+    select 
+		a.call_start_dt,
+		a.mtn,
+		a.acss_call_id,
+		a.cust_id,
+		a.cust_line_seq_id,
+		a.acss_dept_id,
+		a.acss_user_id,
+		a.hr_emp_id as emp_id,
+		a.repeat_interval,
+		a.repeat_acss_call_id,
+		emp.dp_center_type_label,
+		emp.field_label,
+		acc.acss_call_ctr_type,
+		ad.acss_dept_desc,
+		------------- 2 --------------
+		a.active_cnt,
+		a.repeat_2_hour,
+		a.repeat_same_day,
+        a.repeat_3_day,
+		a.repeat_31_day,
+		------------ 3  ---------------	
+		cfl.center_type,
+		cfl.acss_call_ctr_desc as Contact_Center,
+		acc.acss_call_ctr_desc,
+		cfl.field_label_desc,
+		------------- 4 ----------------
+        nnb.trans_activity_type,
+        nnb.trans_pymnt_dt,
+        nnb.invc_dt,
+        nnb.ndcir_cust_id,
+        nnb.ndcir_cust_line_seq_id,
+        nnb.ndcir_acss_call_id,
+        nnb.line_type,
+        nnb.trans_type,
+		nnb.Prev_Device,
+		nnb.Device,
+		nnb.os_type_prev,
+		nnb.os_type,
+        nnb.Device_gen_Chgn,
+        nnb.hr_emp_id,
+        nnb.acss_netace_user_id,
+        nnb.activation_flag,
+		----------- 5 -----------------
+		icm.call_answer_dt,
+        icm.icm_acss_call_id,
+        icm.lob_nm,  
+        icm.slob_nm,
+		---------- 6 -----------------
+		ppb.trans_dt,  
+        ppb.user_id,
+        ppb.pplan_cust_id,  
+        ppb.pplan_cust_line_seq_id, 
+        ppb.pplan_desc,
+        ppb.pplan_acss_call_id,
+        ppb.pplan_acd_call_id,
+        ppb.pplan_ivr_call_id, 
+		------------- 7 ------------------
+		e.nm_last||', '||e.nm_first as rep_nm,
+		e.super_nm_lvl2 as sup_nm,
+		e.super_nm_lvl1 as sr_mgr_nm
+		
+    from ntl_prd_allvm.acss_repeat_call_detail_v as a
+	
+	----------------------  Add for new repeat table -------------------
+	
+ inner join ntl_prd_allvm.acss_call_v as acv
+        on 
+		(
+		a.call_start_dt = acv.acss_call_dt
+        and a.acss_call_id = acv.acss_call_id
+		)
+    
+    left join ntl_prd_qmtbls.kelchfr_emp_info as emp
+        on 
+		(
+		a.acss_user_id = emp.nt_userid
+        and a.call_start_dt between emp.eff_dt and emp.exp_dt
+		)
+        
+    left join ntl_prd_allvm.acss_call_center_v as acc
+        on 
+		(
+		acv.acss_call_ctr_cd = acc.acss_call_ctr_cd
+		)
+
+    left join  ntl_prd_qmtbls.center_field_label_v as cfl
+        on 
+		(
+		acv.acss_call_ctr_cd = cfl.acss_call_ctr_cd
+        )
+		
+    left join ntl_prd_allvm.acss_dept_v as ad
+        on 
+		(
+		a.acss_dept_id = ad.acss_dept_id    
+        )  
+		
+	left join ntl_prd_qmtbls.orig_dept_repeat_Link_emh as drl
+        on 
+		(
+		ad.acss_dept_id = drl.orig_dept_id
+		)
+		
+	
+	------------------------------- Addition links  ------------------------------------
+	
+	left join icm_base as icm
+	on  (cast(a.call_start_ts_est as date)) = icm.call_answer_dt
+	and a.acss_call_id = icm.icm_acss_call_id
+    
+    left join ndcir_noncomm_base as nnb
+    on a.call_start_dt = nnb.acss_call_dt
+    and a.acss_call_id = nnb.ndcir_acss_call_id
+    
+    left join priceplan_noncomm_base as ppb
+    on a.call_start_dt = ppb.trans_dt
+    and a.acss_call_id = ppb.pplan_acss_call_id
+	
+	left join ntl_prd_allvm.employee_contractor_hist_v as e
+	on a.acss_user_id = e.nt_user_id
+	and a.call_start_dt between e.eff_dt and e.exp_dt
+	
+
+    where a.call_start_dt between '2016-10-01' and date - 35                      
+    and a.cs_active_cnt = '1'        ---This is to only return CS, BGCO, WDTS  
+	and emp.field_label <> 'Headquarters'
+    and emp.dp_center_type_label in ('Inhouse','Outsource')
+    and drl.orig_dept_type = 'CS'   
+	
+	
+    ) a
+    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18;
+	
+	---------------------------------------------------------------------------------------------------------------------
+    
+    collect stats on ntl_prd_qmtbls.tblMTL_Repeat_Resolution_Emp_v column(call_month);
+    collect stats on ntl_prd_qmtbls.tblMTL_Repeat_Resolution_Emp_v column(acss_call_ctr_desc);
+	collect stats on ntl_prd_qmtbls.tblMTL_Repeat_Resolution_Emp_v column(acss_user_id);
+    grant sel on ntl_prd_qmtbls.tblMTL_Repeat_Resolution_Emp_v to public;
+	
+    delete from ntl_prd_qmtbls.tblMTL_bottom_25_Rep_Res
+		where call_month >= '2016-10-01';
+		
+---------------------------------------------------------------------------------------------------------------------
+	
+--Bottom 25 Reps by Center
+
+ins into ntl_prd_qmtbls.tblMTL_bottom_25_Rep_Res
+
+    select
+        call_month,
+        center_type,
+		field_label_desc,	
+        acss_call_ctr_desc,
+        rep_nm,
+        sup_nm,
+        sr_mgr_nm,
+        acss_dept_desc,
+        totalcalls,
+        repeat_3day_calls,
+        rnk
+    
+    from (select a.*
+
+        from (select a.*,
+
+            rank() over(partition by call_month,acss_call_ctr_desc, acss_dept_desc    
+                order by (repeat_3day_per)desc)  as rnk
+
+    from (
+
+    select
+        call_month,
+        center_type,
+        field_label_desc,
+        acss_call_ctr_desc,
+        rep_nm,
+        sup_nm,
+        sr_mgr_nm,
+        acss_dept_desc,
+        totalcalls,
+        repeat_3day_calls,
+
+         nullifzero(cast(repeat_3day_calls as decimal(18,3)))/nullifzero(cast(totalcalls as decimal(18,3))) as repeat_3day_dec,
+         
+         (totalcalls - repeat_3day_calls)/(cast(totalcalls as decimal(18,3))) as resolution_3day_dec,
+
+         (nullifzero(cast(repeat_3day_calls as decimal(18,3)))/nullifzero(cast(totalcalls as decimal(18,3)))* 100) ||' % ' as repeat_3day_per,
+         
+        (((totalcalls - repeat_3day_calls)/(cast(totalcalls as decimal(18,3))) )* 100) ||' % ' as resolution_3day_per,
+
+         (max_calendar_dt - min_calendar_dt) as current_days_in_month,
+
+        case when current_days_in_month is not null  then totalcalls/current_days_in_month else null end avg_total_calls,
+
+        case when current_days_in_month is not null  then repeat_3day_calls/current_days_in_month else null end avg_3day_calls
+
+    from ntl_prd_qmtbls.tblmtl_repeat_resolution_emp_v as rre
+    
+    left join (    select
+        calendar_date-extract(day from calendar_date)+1 as calendar_month,
+        min(calendar_date) as min_calendar_dt,
+        max(calendar_date) as max_calendar_dt
+
+    from sys_calendar.calendar
+
+    where year_of_calendar >= '2016'
+    and calendar_date <= date - 2
+
+    group by 1
+    
+    ) as ca
+    on rre.call_month = ca.calendar_month
+
+    where call_month >= '2016-10-01'
+    and avg_total_calls >= '8.25'  /***   The rep has to average at least 8.50 calls per day over the course of  28,29, 30, or 31 days. ***/
+    and avg_3day_calls >='1.35'  /**  The rep has to average at least 1.35 repeat calls per day over the course of 28, 29, 30, 31 days. ***/
+
+    ) as a) as a
+    
+    where  rnk <= '25'
+
+        ) as a
+
+        group by
+        call_month,
+        center_type,
+        field_label_desc,
+        acss_call_ctr_desc,
+        rep_nm,
+        sup_nm,
+        sr_mgr_nm,
+        acss_dept_desc,
+        totalcalls,
+        repeat_3day_calls,
+        rnk;
+            
+
