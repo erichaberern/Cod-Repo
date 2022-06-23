@@ -1,0 +1,212 @@
+USE [dbCS_NTL_RPT]
+GO
+
+/****** Object:  StoredProcedure [Shared].[DS_TRANSFERS]    Script Date: 2/28/2017 1:12:34 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+-- =============================================
+-- Author:           <Author,,Name>
+-- Create date: <Create Date,,>
+-- Description:      <Description,,>
+-- =============================================
+CREATE PROCEDURE [Shared].[DS_TRANSFERS] 
+       -- Add the parameters for the stored procedure here
+@startdate DATETIME, 
+@enddate DATETIME,
+@DateValue datetime = null,
+@MonthNumber integer = null
+
+AS
+IF @DateValue is null  
+SET @DateValue =getdate()-1
+IF @MonthNumber is null  
+SET @MonthNumber = (CASE WHEN DAY(GETDATE()-1) = 1 THEN 
+                                                (CASE WHEN MONTH(GETDATE()-1) = 1 THEN 12 ELSE MONTH(GETDATE())-1 END)
+                                                ELSE MONTH(GETDATE()-1) END)BEGIN
+       -- SET NOCOUNT ON added to prevent extra result sets from
+       -- interfering with SELECT statements.
+SET NOCOUNT ON;
+
+    -- Insert statements for procedure here
+
+CREATE TABLE #DataTableTransfers (
+ReportMonth DATETIME,
+statdate DATETIME,
+PeopleSoftAreaID VARCHAR(150),
+PeopleSoftDepartmentID VARCHAR(150),
+PeopleSoftDepartmentFunctionID VARCHAR(150),
+geographiclocationdescription VARCHAR(150),
+GCOStateLocalIndicator VARCHAR(150),
+TechTeirTitleSplit VARCHAR(150),
+transfersout INTEGER,
+handledcalls INTEGER
+);
+
+INSERT INTO #DataTableTransfers
+SELECT
+DATEADD(mm, DATEDIFF(mm,0,(DATEADD(mm, 0, dt.datefull))), 0) AS ReportMonth,
+dt.datefull AS statdate ,
+--e.areaID,
+e.PeopleSoftAreaID,
+e.PeopleSoftDepartmentID,
+e.PeopleSoftDepartmentFunctionID,
+--vl.virtuallocationdescription,
+--acsu.ACSSCallCenterKey,
+--acscall.ACSSCallCenterName,
+--acsdept.ACSSDepartmentName,
+--s.LocationDesc,
+--acsu.EmployeeID,
+--vl.AreaID,
+gl.geographiclocationdescription,
+CASE WHEN (Level04ID IN ('493721','518917','487946','505066','450451','486232','510791','534189') AND e.PeopleSoftDepartmentID IN ('9165','9166','9167','9169')) THEN 'GCO-StateLocal' ELSE 'GCO-NonStateLocal' END AS GCOStateLocalIndicator,
+CASE WHEN E.PeopleSoftTitleID = 'V51269' THEN 'Tier 4 - WEHD Analyst' 
+                     WHEN E.PeopleSoftTitleID = 'V51270' THEN 'Tier 2 - Core Coord 1' 
+                     WHEN E.PeopleSoftTitleID = 'V51271' THEN 'Tier 3 - GreenHouse Coord 2' 
+                     ELSE 'NONTECHREP' END AS TechTeirTitleSplit,
+              CASE
+                     WHEN geographiclocationdescription IN ('Dublin','Elgin','Mankato','Bangor','Charlotte','Columbia','Wallingford','Tampa','Chandler','El Paso')
+                     THEN SUM(ISNULL(d.transfersout,0))
+                     ELSE SUM(ISNULL(eap.transfersout,0)) END AS transfersout,
+              SUM(ISNULL(eap.handledcalls,0)) AS handledcalls
+
+
+       FROM dbTools.Config.vwDate AS dt WITH (NOLOCK)
+
+       LEFT JOIN dbemployee.summary.vwemployeehistory e WITH (NOLOCK) 
+       ON (dt.datefull <= e.EndDate AND dt.datefull >= e.StartDate)
+       AND e.EmployeeID IS NOT NULL
+
+       LEFT JOIN --The following is a subselect gathers Rockwell transfer data and Handled Calls for all ACD types
+              (SELECT
+                     StatDate,
+                     EmployeeID,
+                     SUM(ISNULL(HandledCalls,0)) AS HandledCalls,
+                     SUM(ISNULL(TransfersOut,0)) AS TransfersOut
+
+              FROM dbReportSummary.ReportSummary.vwACDAgentSummary WITH (NOLOCK)
+
+              WHERE
+                     EmployeeID IS NOT NULL
+                     AND StatDate >= @startdate
+                     AND StatDate <= @enddate
+
+              GROUP BY
+                     StatDate,
+                     EmployeeID) AS eap
+       ON (eap.StatDate IN (dt.datefull))
+       AND eap.EmployeeID = e.EmployeeID
+
+       LEFT JOIN --The following is a subselect to gather IPACD Transfer data
+              (SELECT
+                     c.OutdialDate,
+                     c.EmployeeID,
+                     SUM(ISNULL(DialedCount,0)) AS TransfersOut
+
+              FROM dbacd.Detail.vwOutdials AS c WITH (NOLOCK)
+
+              LEFT JOIN dbDestMapping.Config.vwDialedDigitMapping AS m WITH (NOLOCK)
+              ON m.DialedDigitString = c.DigitsDialed
+              AND (c.OutdialDate <= m.EndDate AND c.OutdialDate >= m.StartDate)
+              AND c.SiteID = m.SiteID
+
+              WHERE
+                     EmployeeID IS NOT NULL
+                     AND OutdialDate >= @startdate
+                     AND OutdialDate <= @enddate
+                     AND Outcome = 1
+                     AND DigitsDialed IS NOT NULL
+
+              GROUP BY
+                     OutdialDate,
+                     EmployeeID) AS d
+       ON (d.OutdialDate IN (dt.datefull))
+       AND d.EmployeeID = e.EmployeeID
+
+LEFT JOIN dbemployee.config.vwvirtuallocation vl WITH ( NOLOCK )
+       ON e.virtuallocationid = vl.virtuallocationid
+LEFT JOIN dbemployee.config.vwvirtuallocationtype vlt WITH (NOLOCK)
+       ON e.virtuallocationtypeid = vlt.virtuallocationtypeid
+LEFT JOIN dbDashboard.config.tblPeopleSoftLocation s WITH (NOLOCK)
+       ON e.PeopleSoftLocationID = s.PeopleSoftLocationID
+LEFT JOIN dbemployee.config.vwgeographiclocation gl WITH ( NOLOCK)
+       ON e.geographiclocationid = gl.geographiclocationid
+LEFT JOIN dbEmployee.Config.vwPeopleSoftDepartment p WITH (NOLOCK)
+       ON e.PeopleSoftDepartmentID = p.PeopleSoftDepartmentID
+LEFT JOIN dbEmployee.config.vwArea a2 WITH (NOLOCK)
+       ON e.PeopleSoftAreaID = a2.AreaID
+LEFT JOIN dbEmployee.config.vwArea a3 WITH (NOLOCK)
+       ON e.AreaID = a3.AreaID
+
+LEFT JOIN dbACSS.Config.vwACSSUser acsu
+   ON e.employeeid =       acsu.employeeid
+LEFT JOIN dbACSS.Config.vwACSSCallCenter acscall
+   ON  acsu.acssCallCenterkey = acscall.ACSSCallCenterKey
+LEFT JOIN dbACSS.Config.vwACSSDepartment acsdept
+   ON acsu.ACSSDepartmentKey = acsdept.ACSSDepartmentKey
+
+WHERE dt.datefull >= @startdate
+AND dt.datefull <= @enddate
+AND  (e.PeoplesoftDepartmentID IN ('9150','9165','9151')
+OR acsu.ACSSDepartmentKey IN ('318','319'))
+
+GROUP BY 
+DATEADD(mm, DATEDIFF(mm,0,(DATEADD(mm, 0, dt.datefull))), 0),
+dt.datefull,
+--e.areaID,
+e.PeopleSoftAreaID,
+e.PeopleSoftDepartmentID,
+e.PeopleSoftDepartmentFunctionID,
+--acsu.ACSSCallCenterKey,
+--acscall.ACSSCallCenterName,
+--acsdept.ACSSDepartmentName,
+--s.LocationDesc,
+--vl.virtuallocationdescription,
+--acsu.EmployeeID,
+--vl.AreaID,
+gl.geographiclocationdescription,
+CASE WHEN (Level04ID IN ('493721','518917','487946','505066','450451','486232','510791','534189') AND e.PeopleSoftDepartmentID IN ('9165','9166','9167','9169')) THEN 'GCO-StateLocal' ELSE 'GCO-NonStateLocal' END,
+CASE WHEN E.PeopleSoftTitleID = 'V51269' THEN 'Tier 4 - WEHD Analyst' 
+                     WHEN E.PeopleSoftTitleID = 'V51270' THEN 'Tier 2 - Core Coord 1' 
+                     WHEN E.PeopleSoftTitleID = 'V51271' THEN 'Tier 3 - GreenHouse Coord 2' 
+                     ELSE 'NONTECHREP' END;
+                     
+SELECT 
+a.*
+,'cm' AS Indicator
+FROM #DataTableTransfers  a
+WHERE ReportMonth = DATEADD(mm, DATEDIFF(mm,0,(DATEADD(mm, 0, @DateValue))), 0)
+
+UNION ALL
+
+SELECT 
+a.*
+,'pm' AS Indicator
+FROM #DataTableTransfers  a
+WHERE ReportMonth = DATEADD(mm, DATEDIFF(mm,0,(DATEADD(mm, -1, @DateValue))), 0)
+
+UNION ALL
+
+SELECT 
+a.*
+,'py' AS Indicator
+FROM #DataTableTransfers  a
+WHERE YEAR(a.ReportMonth) = YEAR(@DateValue) - 1
+AND MONTH(a.ReportMonth) BETWEEN 1 AND @MonthNumber
+
+UNION ALL
+
+SELECT 
+a.*
+,'cy' AS Indicator
+FROM #DataTableTransfers  a
+WHERE YEAR(a.ReportMonth) = YEAR(@DateValue)
+AND MONTH(a.ReportMonth) BETWEEN 1 AND @MonthNumber
+END
+
+
+GO
