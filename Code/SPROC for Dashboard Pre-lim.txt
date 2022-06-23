@@ -1,0 +1,104 @@
+/***************************************************************************************************
+This sproc updates Actuals for the CS Dashboard
+***************************************************************************************************/
+DECLARE
+	@Return_Value AS INT
+	,@ReportMonth AS DATETIME = '7/1/2016'
+
+/***************************************************************************************************
+Build Temp Table for Time Stamps
+***************************************************************************************************/
+CREATE TABLE	#dbMatrix_TimeStamps
+	(
+	Sproc VARCHAR(50)
+	,StartTime DATETIME --SMALLDATETIME
+	,EndTime DATETIME --SMALLDATETIME
+	)
+;
+/***************************************************************************************************
+Run Main Sproc
+***************************************************************************************************/
+/**/
+INSERT INTO #dbMatrix_TimeStamps VALUES ( 'spCognosdbMatrix' , SYSDATETIME () , NULL )
+
+EXEC	@Return_Value = dbDashboard.dbMatrix.spCognosdbMatrix
+		@RptMonth = @ReportMonth
+
+UPDATE #dbMatrix_TimeStamps SET EndTime = SYSDATETIME() WHERE Sproc = 'spCognosdbMatrix'
+
+SELECT	@Return_Value AS 'ReturnValue'
+/**/
+/***************************************************************************************************
+Update Adjusted Calls per Day ( ACPD ) Measures
+***************************************************************************************************/
+/**/
+INSERT INTO #dbMatrix_TimeStamps VALUES ( 'spCognosdbMatrix_ACPD' , SYSDATETIME() , NULL )
+
+EXEC	@Return_Value = dbDashboard.dbMatrix.spCognosdbMatrix_ACPD
+		@RptMonth = @ReportMonth
+
+UPDATE #dbMatrix_TimeStamps SET EndTime = SYSDATETIME() WHERE Sproc = 'spCognosdbMatrix_ACPD'
+
+SELECT	@Return_Value AS 'ReturnValue'
+/**/
+/***************************************************************************************************
+Update Prior-Month Repeats
+***************************************************************************************************/
+/**/
+INSERT INTO #dbMatrix_TimeStamps VALUES ( 'spCognosdbMatrix_Repeats' , SYSDATETIME() , NULL )
+
+EXEC	@Return_Value = dbDashboard.dbMatrix.spCognosdbMatrix_Repeats
+		@RptMonth = @ReportMonth
+
+UPDATE #dbMatrix_TimeStamps SET EndTime = SYSDATETIME() WHERE Sproc = 'spCognosdbMatrix_Repeats'
+
+SELECT	@Return_Value AS 'ReturnValue'
+/**/
+/***************************************************************************************************
+Update Prior-Month NDCIR
+***************************************************************************************************/
+/**/
+INSERT INTO #dbMatrix_TimeStamps VALUES ( 'spCognosdbMatrix_NDCIR' , SYSDATETIME() , NULL )
+
+EXEC	@Return_Value = dbDashboard.dbMatrix.spCognosdbMatrix_NDCIR
+		@RptMonth = @ReportMonth
+
+UPDATE #dbMatrix_TimeStamps SET EndTime = SYSDATETIME() WHERE Sproc = 'spCognosdbMatrix_NDCIR'
+
+SELECT	@Return_Value AS 'ReturnValue'
+/**/
+/***************************************************************************************************
+Fix AFNI so that it will appear in Cognos
+***************************************************************************************************/
+UPDATE	dbDashboard.CognosDashboard.DetaildbMatrix
+
+SET DashboardName = 'Afni'
+
+WHERE
+	ReportMonth = @ReportMonth
+AND	DashboardName = 'AFNI'
+
+--SELECT * FROM dbDashboard.CognosDashboard.DetaildbMatrix
+--WHERE	ReportMonth = @ReportMonth AND DashboardName = 'Afni'
+/***************************************************************************************************
+Fix Firstsource so that it will appear in Cognos
+***************************************************************************************************/
+UPDATE	dbDashboard.CognosDashboard.DetaildbMatrix
+
+SET DashboardName = 'Firstsource'
+
+WHERE
+	ReportMonth = @ReportMonth
+AND	DashboardName = 'FirstSource'
+
+--SELECT * FROM dbDashboard.CognosDashboard.DetaildbMatrix
+--WHERE	ReportMonth = @ReportMonth AND DashboardName = 'FirstSource'
+
+/***************************************************************************************************
+View Time Stamps
+***************************************************************************************************/
+SELECT * FROM #dbMatrix_TimeStamps
+
+DROP TABLE	#dbMatrix_TimeStamps
+
+GO
