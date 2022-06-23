@@ -1,0 +1,289 @@
+/***************************************************************************************************			
+/*repeat calls Mod by EMH 03/21/16*/			
+***************************************************************************************************/			
+			
+       declare			
+       @startdate as datetime = '01/01/2016'			
+       ,@enddate as datetime = getdate() - 4			
+       ;			
+			
+/*********************************************************/			
+/*This temp table creates the code needed to pull in device*/			
+/*********************************************************/			
+select a.*			
+			
+into #DeviceDATA			
+from (SELECT distinct			
+a.calldate,a.ACSSCallID			
+,a.MODEL_ALIAS1 as Prod_Nm			
+,COALESCE(UPPER(dm.mfg_nm +' '+ dm.device_brand_nm),'Other') as DEVICE			
+,COALESCE(dm.mfg_nm,'Other') as mfg_nm			
+,ROW_NUMBER() OVER(PARTITION BY acsscallid ORDER BY calldate asc) as row			
+			
+FROM (SELECT distinct			
+calldate,ACSSCallID,PhoneMakeModel			
+,RIGHT(PHONEMAKEMODEL,len(PHONEMAKEMODEL)-charindex(' ',PHONEMAKEMODEL)) as MODEL_ALIAS1			
+			
+FROM dbACSS.Detail.vwCall			
+			
+WHERE calldate BETWEEN @StartDate AND @EndDate			
+and (case when calltype in ('4','5','13','16') then 1			
+when calltype = '3' and IVRCallID is null then 2			
+else 3 end) = '3'			
+			
+group by calldate			
+,ACSSCallID,PhoneMakeModel			
+,RIGHT(PHONEMAKEMODEL,len(PHONEMAKEMODEL)-charindex(' ',PHONEMAKEMODEL))			
+) AS a			
+			
+Left join dbcs_ntl_rpt.protected.device_dp_map_v as dm			
+on a.MODEL_ALIAS1 = dm.MODEL_ALIAS			
+			
+group by			
+a.calldate			
+,a.ACSSCallID			
+,a.MODEL_ALIAS1			
+,COALESCE(UPPER(dm.mfg_nm +' '+ dm.device_brand_nm),'Other')			
+,COALESCE(dm.mfg_nm,'Other')			
+) as a			
+			
+where row = 1			
+			
+/***************************************************************************************************			
+/*build data set*/			
+***************************************************************************************************/			
+			
+       select			
+              rpt.reportyear			
+              ,rpt.report_month			
+              ,rpt.reportmonth			
+			
+              ,case when rpt.monthnum in ('1','2','3') then 'Q1'			
+			
+                     when rpt.monthnum in ('4','5','6') then 'Q2'			
+			
+                           when rpt.monthnum in ('7','8','9') then 'Q3'			
+			
+                                  when rpt.monthnum in ('10','11','12') then 'Q4' 			
+			
+                                         else null end as report_quarter			
+			
+              ,rpt.serviceareadesc			
+              ,rpt.fieldopsrollup			
+              ,rpt.callcentertype			
+              ,rpt.callcenterdesc			
+			  ,rpt.device
+			  ,rpt.dm_oem
+			
+              ,sum(totalcalls) as totalcalls			
+			
+              ,sum(repeatcalls2hr) as repeatcalls2hr			
+			
+              ,sum(repeatcalls3day) as repeatcalls3day			
+			
+              ,sum(repeatcalls7day) as repeatcalls7day			
+			
+       from (select			
+              year(cd.calldate) as reportyear			
+			
+              ,datename(month,cd.calldate) as report_month			
+			
+              ,dateadd( month , datediff( month , 0 , cd.calldate ) , 0 ) as reportmonth			
+			
+              ,datepart(month, cd.calldate) as monthnum			
+			
+              ,case when hr.callcentertype = 'outsource' then xref.areadesc			
+                     			
+                     else hr.areadesc end as serviceareadesc			
+			
+              /*******************************************************************************			
+              /*csfo / field ops logic*/			
+              *******************************************************************************/			
+              --,xref.fieldlabel as fieldopsrollup			
+			
+                       ,CASE WHEN hr.CallCenterType IN ( 'Inhouse' ) AND hr.dpSkillGroupLabel IN ( 'LNP' ) THEN 'LNP'			
+			
+                           ELSE xref.FieldLabel			
+			
+                                  END AS FieldOpsRollup			
+              /******************************************************************************/			
+              ,hr.callcentertype as callcentertype			
+			
+              ,case when hr.callcentertype = 'outsource' then coalesce( xref.parentcenterdesc , hr.callcenterdesc , 'undefined' )			
+			
+                     else coalesce( xref.parentcenterlabel , hr.callcenterdesc , 'undefined' )			
+			
+                           end as callcenterdesc			
+			
+			   ,dm.device
+			
+			   ,dm.mfg_nm as dm_oem
+              /******************************************************************************/			
+              /*businessgroup logic: replaces filters in sproc for cs dashboard*/			
+              /*******************************************************************************/			
+			
+              ,case when hr.callcenterdesc like '%area staff%' then 'consumer - exclude'			
+			
+                     when hr.callcenterdesc like '%tag%' then 'consumer - tag'			
+			
+                     when hr.callcenterdesc like '%core%' then 'cs - core'			
+			
+                     when hr.callcenterdesc like '%prepay%' then 'cs - prepay'			
+			
+                     when hr.callcenterdesc like '%telesales%' then 'non-cs - telesales'			
+			
+                     when hr.callcenterdesc like '%bgco%' then 'non-cs - bgco'			
+			
+                     when hr.callcenterdesc like '%wireline - cfs%' then 'non-cs'			
+			
+                     when xref.parentcenterdesc in ( 'afni, riverside iii az' ) then 'consumer - ignore'			
+			
+                     when xref.parentcenterlabel in ( 'cs ops' ) then 'consumer - ignore'			
+			
+                     when hr.dpskillgrouplabel in ( 'cs offline' ) then 'consumer - ignore'			
+			
+                     when hr.dpskillgrouplabel in ( 'prepay care' , 'prepay tech' ) then 'cs - prepay'			
+			
+                     when hr.dpskillgrouplabel in ( 'bsc' , 'gsc' ) then 'non-cs - bgco'			
+			
+                     when hr.dpskillgrouplabel in ( 'telesales' ) then 'non-cs - telesales'			
+			
+                     when hr.dpskillgrouplabel in ( 'non-care' , 'wireline - cfs' ) then 'non-cs'			
+			
+                     when hr.dpskillgrouplabel in ( 'other' , 'undefined' ) then 'exclude'			
+			
+              else 'consumer'			
+			
+                     end as business_group			
+			
+              ,hr.dpskillgrouplabel			
+			
+             ,count(*) as totalcalls   			
+			  
+		     ,sum(cast(cd.is2hourrepeat as tinyint)) as repeatcalls2hr 	
+			
+		     ,sum(cast(cd.is3dayrepeat as tinyint)) as repeatcalls3day  	
+			
+		     ,sum(cast(cd.is7dayrepeat as tinyint)) as repeatcalls7day	
+			
+			
+       from dbACSS.Detail.vwMyInfo_RollupCall AS cd			
+			
+       join dbdashboard.config.vwhremployee2yrwithterminatedrecords as hr			
+       on cd.employeeid = hr.employeeid			
+       and cd.calldate between hr.startdate and hr.enddate			
+			
+	   left join #devicedata as dm		
+	   on cd.calldate = dm.calldate		
+	   and cd.acsscallid = dm.acsscallid		
+			
+       /*******************************************************/			
+			
+       left join dbdashboard.config.vwcallcenterxrefdatedriven as xref			
+       on xref.callcenterdesc = hr.callcenterdesc			
+       and cd.calldate between xref.startdate and xref.enddate			
+			
+       where cd.calldate between @startdate and @enddate			
+	   AND cd.IncludeInRepeatCalculation = '1' 		
+       and hr.callcentertype in ('inhouse' , 'outsource')			
+       and hr.areadesc not in ('headquarters')			
+			
+			
+       group by			
+       year(cd.calldate) --as reportyear			
+			
+       ,datename(month,cd.calldate) --as report_month			
+       			
+       ,dateadd( month , datediff( month , 0 , cd.calldate ) , 0 ) --as reportmonth			
+       			
+       ,datepart(month, cd.calldate) --as monthnum			
+       			
+       ,case when hr.callcentertype = 'outsource' then xref.areadesc			
+			
+              else hr.areadesc end --as serviceareadesc			
+       /*******************************************************************************			
+       /*csfo / field ops logic*/			
+       *******************************************************************************/			
+       --,xref.fieldlabel --as fieldopsrollup			
+			
+                ,CASE WHEN hr.CallCenterType IN ( 'Inhouse' ) AND hr.dpSkillGroupLabel IN ( 'LNP' ) THEN 'LNP'			
+			
+                           ELSE xref.FieldLabel			
+			
+                                  END --AS FieldOpsRollup			
+       /******************************************************************************/			
+       ,dateadd( month , datediff( month , 0 , cd.calldate ) , 0 ) --as reportmonth			
+			
+       ,hr.callcentertype --as callcentertype			
+			
+       ,case when hr.callcentertype = 'outsource' then coalesce( xref.parentcenterdesc , hr.callcenterdesc , 'undefined' )			
+			
+              else coalesce( xref.parentcenterlabel , hr.callcenterdesc , 'undefined' )			
+			
+                     end --as callcenterdesc			
+		,dm.device	
+			
+		,dm.mfg_nm --as dm_oem	
+			
+			
+       /******************************************************************************/			
+       /*businessgroup logic: replaces filters in sproc for cs dashboard*/			
+       /*******************************************************************************/			
+       ,case when hr.callcenterdesc like '%area staff%' then 'consumer - exclude'			
+			
+                     when hr.callcenterdesc like '%tag%' then 'consumer - tag'			
+			
+                     when hr.callcenterdesc like '%core%' then 'cs - core'			
+			
+                     when hr.callcenterdesc like '%prepay%' then 'cs - prepay'			
+			
+                     when hr.callcenterdesc like '%telesales%' then 'non-cs - telesales'			
+			
+                     when hr.callcenterdesc like '%bgco%' then 'non-cs - bgco'			
+			
+                     when hr.callcenterdesc like '%wireline - cfs%' then 'non-cs'			
+			
+                     when xref.parentcenterdesc in ( 'afni, riverside iii az' ) then 'consumer - ignore'			
+			
+                     when xref.parentcenterlabel in ( 'cs ops' ) then 'consumer - ignore'			
+			
+                     when hr.dpskillgrouplabel in ( 'cs offline' ) then 'consumer - ignore'			
+			
+                     when hr.dpskillgrouplabel in ( 'prepay care' , 'prepay tech' ) then 'cs - prepay'			
+			
+                     when hr.dpskillgrouplabel in ( 'bsc' , 'gsc' ) then 'non-cs - bgco'			
+			
+                     when hr.dpskillgrouplabel in ( 'telesales' ) then 'non-cs - telesales'			
+			
+                     when hr.dpskillgrouplabel in ( 'non-care' , 'wireline - cfs' ) then 'non-cs'			
+			
+                     when hr.dpskillgrouplabel in ( 'other' , 'undefined' ) then 'exclude'			
+			
+              else 'consumer'			
+                     end ---as business_group			
+       ,hr.dpskillgrouplabel			
+			
+       ) as rpt			
+			
+       where rpt.business_group = 'Consumer'			
+			
+			
+       group by			
+       rpt.reportyear			
+       ,rpt.report_month			
+       ,rpt.reportmonth			
+       ,case when rpt.monthnum in ('1','2','3') then 'Q1'			
+			
+              when rpt.monthnum in ('4','5','6') then 'Q2'			
+			
+                     when rpt.monthnum in ('7','8','9') then 'Q3'			
+			
+                           when rpt.monthnum in ('10','11','12') then 'Q4' 			
+			
+                                  else null end --as report_quarter			
+       ,rpt.serviceareadesc			
+       ,rpt.fieldopsrollup			
+       ,rpt.callcentertype			
+       ,rpt.callcenterdesc			
+       ,rpt.device			
+	   ,rpt.dm_oem	
