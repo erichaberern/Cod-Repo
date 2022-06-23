@@ -1,0 +1,921 @@
+    -------------------------------------------------------------------------------------------------------
+        --Tables are good until the next day (12:01am). At that time they will auto drop
+    -------------------------------------------------------------------------------------------------------
+
+/*    drop table ntl_prd_qmtmptbls.echat_detail1;
+        drop table ntl_prd_qmtmptbls.detail_tblcalls;
+             drop table ntl_prd_qmtmptbls.tblaccountable_calls;
+                drop table ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat;
+                    drop table ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat_a;*/
+                    
+    -------------------------------------------------------------------------------------------------------
+        --Creating initial Chat data for Reporting
+    -------------------------------------------------------------------------------------------------------
+
+		create multiset table ntl_prd_qmtmptbls.echat_detail1 
+
+as (
+
+    select start_dt
+        
+        ,skill_type
+        
+        ,mtn
+        
+        ,cust_id
+        
+        ,cust_line_seq_id
+        
+        ,area_cd
+        
+        ,mkt_cd
+        
+        ,session_id
+        
+        ,type_ind
+        
+        ,enterprise_id
+        
+        ,emp.nt_user_id
+        
+        ,dt_tm
+		
+		,dt_tm1
+		
+		,start_dttm
+		
+		,start_dttm1
+        
+        ,cast (dt_tm as timestamp(0))                            as time_stamp_start
+        
+        ,cast('2010-01-01'  as date) as base_date
+        
+        ,cast(((start_dt  - base_date) * 86400
+        
+        + (extract(hour from time_stamp_start) * 3600)
+        
+        + (extract(minute from time_stamp_start) * 60)
+        
+        + (extract(second from time_stamp_start))) as varchar(10))    as string
+        
+        ,(a.cust_id||a.cust_line_seq_id||string||emp.nt_user_id)          as key_id   ---This key was created to come up with a replacement for acss_call_id
+        
+
+    from (select
+        case when cast((a.echat_start_ts - interval '4' hour) as date) <= 1160313 then    ---Ask doug about this interval of 4 in this case statement
+        
+            cast((a.echat_start_ts - interval '5' hour) as date) else
+            
+            cast((a.echat_start_ts - interval '5' hour) as date) end
+            
+            as start_dttm
+		----------------------------------------------------------------------				
+		,case when cast((a.echat_start_ts - interval '4' hour) as date)  between dst.begindate and dst.enddate
+		
+        	then cast((a.echat_start_ts - interval '5' hour) as date)
+			
+        		else cast((a.echat_start_ts - interval '5' hour) as date)
+				
+        			end as start_dttm1
+		----------------------------------------------------------------------	            
+        ,cast(start_dttm as date)                                    as start_dt
+        
+        ,case when a.eng_skill_nm like '%device%' then 'device'
+        
+            when a.eng_skill_nm like '%billing%' then 'billing'
+            
+            when a.eng_skill_nm like '%mvtrans%' then 'mvtrans'
+            
+            when a.eng_skill_nm like '%global%' then 'global'
+            
+            else 'other' end                                             as skill_type
+            
+        ,c.mtn
+        
+        ,c.cust_id
+        
+        ,c.cust_line_seq_id
+        
+        ,c.area_cd
+        
+        ,c.mkt_cd
+        
+        ,a.echat_session_id                                         as session_id
+        
+        ,'chat' as type_ind
+        
+        ,substr(agent_id, 0, index(agent_id, '@'))    as enterprise_id
+        
+            ,max(cast(case when cast((a.echat_start_ts - interval '4' hour) as date) <=  1160313 then
+            
+            (a.echat_start_ts - interval '5' hour)  else
+            
+            (a.echat_start_ts - interval '5' hour) end as timestamp (0)))    as dt_tm
+		----------------------------------------------------------------------	
+		,max(cast(case when cast((a.echat_start_ts - interval '4' hour) as date)  between dst.begindate and dst.enddate 
+		
+        	then (a.echat_start_ts - interval '5' hour)
+			
+        		else (a.echat_start_ts - interval '5' hour) end as timestamp (0)))    as dt_tm1
+    	----------------------------------------------------------------------
+
+    from vzweb_prd_allvm.echat_activity_v as a
+
+    inner join vzweb_prd_allvm.echat_session_summary_v as b on 
+    (
+    a.echat_session_id = b.echat_session_id
+    )
+
+    left join ntl_prd_allvm.mtn_xref_dly_hist_v as c on 
+    (
+    b.mtn = c.mtn
+        and c.sor_id = 'v'
+        and c.mtn_status_ind = 'a'
+        and cast((a.echat_start_ts - interval '5' hour) as date) between c.eff_dt and c.exp_dt
+        )
+		
+	    left join ntl_prd_qmtbls.mrs_dst as dst on 
+    (
+    a.echat_start_ts between dst.begindate and dst.enddate
+    )
+
+    where cast((a.echat_start_ts - interval '5' hour) as date) >= '2016-09-01'
+        and cast((a.echat_start_ts - interval '5' hour) as date) < '2016-11-01'
+            and b.mtn is not null
+                and a.agent_id is not null
+                    and a.echat_abandoned_ind = '0'
+                        and coalesce(nullif(substr(a.eng_skill_nm, 0, position('||' in a.eng_skill_nm)),''),a.eng_skill_nm) in 
+                            ('desktop-billing','phone-billing','tablet-billing', 'desktop-mvtrans','phone-mvtrans','tablet-mvtrans',
+                                'desktop-global','phone-global','tablet-global','phone-device','tablet-device','desktop-device')
+        
+    group by 1,2,3,4,5,6,7,8,9,10,11,12) as a
+    
+        left join ntl_prd_allvm.employee_contractor_v as emp   ---Testing run with and without the history table for eid
+        on (
+        a.enterprise_id = emp.eid
+        )
+        --and start_dt between emp.eff_dt and emp.exp_dt
+        
+    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    )    
+    with data
+    primary index ( cust_id, cust_line_seq_id)
+    index(start_dt);
+    
+    -------------------------------------------------------------------------------------------------------
+    ---Generating the intial CS Calls / Step 1 
+    -------------------------------------------------------------------------------------------------------
+
+create multiset table ntl_prd_qmtmptbls.detail_tblcalls
+
+    as(
+    select
+        ac.acss_call_dt                  as calldate
+        ,ac.mtn
+        ,ac.cust_id
+        ,ac.acct_num
+        ,ac.cust_line_seq_id
+        ,ac.acss_call_dt
+        ,ac.acss_call_tm
+        ,ech.hr_emp_id
+        ,ech.emp_id
+        ,ac.acss_user_id
+        ,case when e.acss_call_ctr_type = 'o' 
+        then 'spc' else e.acss_area_cd 
+        end acss_area 
+        ,ac.acss_call_ctr_cd
+        ,e.acss_call_ctr_desc
+        ,d.acss_dept_desc
+        ,ac.acss_dept_id
+        ,ac.acss_call_id
+        ,ac.acd_call_id
+        ,ac.ivr_call_id
+        ,ac.acss_call_type_cd
+        ,act.acss_call_type_desc
+        ,cast ((ac.acss_call_dt (date ,format'yyyy-mm-dd') ) as char(10)) acss_dt_start
+        ,cast ((ac.acss_call_tm  (time(0),format'hhmiss') ) as char(06)) acss_tm_start
+        ,(acss_dt_start || acss_tm_start) (timestamp(0),format'yyyy-mm-ddhhmiss')       as callstartdtm
+        ,case 
+        when acc.acss_call_ctr_time_zn in ('cdt','cst') 
+        then callstartdtm + interval '1' hour
+        when acc.acss_call_ctr_time_zn in ('mst','mdt') and acc.state_cd <> 'az'
+        then callstartdtm + interval '2' hour
+        when acc.state_cd = 'az' then
+        case when ac.acss_call_dt between dst.begindate and dst.enddate 
+        then callstartdtm + interval '3' hour
+        else callstartdtm + interval '2' hour
+        end
+        when acc.acss_call_ctr_time_zn in ('pdt','pst')
+        then callstartdtm + interval '3' hour
+        when acc.acss_call_ctr_time_zn in ('hdt','hst') then
+        case when ac.acss_call_dt between dst.begindate and dst.enddate 
+        then callstartdtm + interval '6' hour
+        else callstartdtm + interval '5' hour
+        end
+        else callstartdtm
+        end as callstartdtm_est
+        ,cast ((ac.call_disconnect_dt (date ,format'yyyy-mm-dd') ) as char(10)) acss_dt_disc
+        ,cast ((ac.call_disconnect_tm  (time(0),format'hhmiss') ) as char(06)) acss_tm_disc
+        ,(acss_dt_disc || acss_tm_disc) (timestamp(0),format'yyyy-mm-ddhhmiss') as calldisconnectdtm
+        ,case 
+        when acc.acss_call_ctr_time_zn in ('cdt','cst') 
+        then  calldisconnectdtm + interval '1' hour
+        when acc.acss_call_ctr_time_zn in ('mst','mdt') and acc.state_cd <> 'az'
+        then  calldisconnectdtm + interval '2' hour
+        when acc.state_cd = 'az' then
+        case when ac.acss_call_dt between dst.begindate and dst.enddate 
+        then  calldisconnectdtm + interval '3' hour
+        else  calldisconnectdtm + interval '2' hour
+        end
+        when acc.acss_call_ctr_time_zn in ('pdt','pst')
+        then  calldisconnectdtm + interval '3' hour
+        when acc.acss_call_ctr_time_zn in ('hdt','hst') then
+        case when ac.acss_call_dt between dst.begindate and dst.enddate 
+        then  calldisconnectdtm + interval '6' hour
+        else  calldisconnectdtm + interval '5' hour
+        end
+        else  calldisconnectdtm
+        end                                     as calldisconnectdtm_est
+        ,cast ((ac.call_end_dt (date ,format'yyyy-mm-dd') ) as char(10)) acss_dt_end
+        ,cast ((ac.call_end_tm  (time(0),format'hhmiss') ) as char(06)) acss_tm_end
+        ,(acss_dt_end || acss_tm_end) (timestamp(0),format'yyyy-mm-ddhhmiss')                    as callenddtm
+        ,case 
+        when acc.acss_call_ctr_time_zn in ('cdt','cst') 
+        then  callenddtm + interval '1' hour
+        when acc.acss_call_ctr_time_zn in ('mst','mdt') and acc.state_cd <> 'az'
+        then  callenddtm + interval '2' hour
+        when acc.state_cd = 'az' then
+        case when ac.acss_call_dt between dst.begindate and dst.enddate 
+        then  callenddtm + interval '3' hour
+        else  callenddtm + interval '2' hour
+        end
+        when acc.acss_call_ctr_time_zn in ('pdt','pst')
+        then  callenddtm + interval '3' hour
+       when acc.acss_call_ctr_time_zn in ('hdt','hst') then
+        case when ac.acss_call_dt between dst.begindate and dst.enddate 
+        then  callenddtm + interval '6' hour
+        else  callenddtm + interval '5' hour
+        end
+        else  callenddtm
+        end                                            as callenddtm_est
+        ,acc.acss_call_ctr_time_zn 
+        ,acc.state_cd
+    
+    from ntl_prd_allvm.acss_call_v as ac
+
+    left join ntl_prd_allvm.acss_call_center_v as e on 
+    (
+    ac.acss_call_ctr_cd = e.acss_call_ctr_cd
+    )
+
+    left  join ntl_prd_allvm.acss_dept_v as d on 
+    (
+    ac.acss_dept_id = d.acss_dept_id
+    )
+
+    left join ntl_prd_allvm.acss_call_type_v as act on 
+    (
+    cast(ac.acss_call_type_cd as int) = cast(act.acss_call_type_cd as int)
+    )
+
+    left join ntl_prd_allvm.acss_user_v as au on 
+    (
+    ac.acss_user_id = au.acss_user_id
+    )
+    
+    left join ntl_prd_allvm.employee_contractor_hist_v as ech on 
+    (
+    ac.acss_user_id = ech.nt_user_id
+    and ac.acss_call_dt between ech.eff_dt and ech.exp_dt
+    )
+        
+    join (select
+        acss_call_ctr_cd
+        ,acss_call_ctr_desc
+        ,acss_region_cd
+        ,acss_call_ctr_type
+        ,acss_call_ctr_status_cd
+        ,acss_area_cd
+        ,acss_addr_line3
+        ,acss_call_ctr_time_zn
+        ,case 
+        when substr(acss_call_ctr_desc,character_length(acss_call_ctr_desc)-1,2)='az' then 'az'
+        else coalesce(z.state_cd,substr(acss_call_ctr_desc,character_length(acss_call_ctr_desc)-1,2)) 
+        end           as state_cd
+
+    from ntl_prd_allvm.acss_call_center_v as acc
+
+    left join ntl_prd_allvm.zip_v as z on 
+    (
+    z.zip5_cd=case when position('-' in acss_addr_line3) > 0 then substr(acss_addr_line3,character_length(acss_addr_line3)-9,5)
+    else substr(acss_addr_line3,character_length(acss_addr_line3)-4,5) end
+    )
+                    
+    where acss_call_ctr_cd<>0) as acc on 
+    (
+    ac.acss_call_ctr_cd = acc.acss_call_ctr_cd
+    )
+       
+    left join ntl_prd_qmtbls.mrs_dst as dst on 
+    (
+    ac.acss_call_dt between dst.begindate and dst.enddate
+    )
+
+    where ac.acss_call_dt >= '2016-09-01' and ac.acss_call_dt < '2016-11-01'
+        )    
+    with data
+    primary index (mtn, cust_id, cust_line_seq_id, acss_call_id, ivr_call_id, acss_call_dt)
+    index(acss_call_dt);
+    
+    -------------------------------------------------------------------------------------------------------
+    --do not include calls where we called customer back and customer didn't answer
+    -------------------------------------------------------------------------------------------------------
+       del
+        from ntl_prd_qmtmptbls.detail_tblcalls as b ---Place your created table name here to scrub data from the reporting
+        where 
+        exists( sel
+1
+        from ntl_prd_allvm.ivr_call_back_attempt_v as c
+        where
+        b.ivr_call_id = c.last_xfer_call_id   ---This is an update from previously since its the hand off of the ivr to the rep
+        and c.call_status in  ('READY',  ---These must be in updercase confirmed on 10/19/16
+        'SERVICE_NOTREQUIRED',
+        'BUSY',
+        'DELIVERED_MACHINE',
+        'UNDELIVERED_MACHINE',
+        'BAD_NUMBER_FAX',
+        'NOT_CONNECTED',
+        'BAD_DATA',
+        'MAXOUT',
+        'QUEUE_MAX_REACHED',
+        'WAITING_FOR_AGENT',
+        'CUSTOMER_HUNGUP',
+        'CALL_BAD_DATA',
+        'FAILED_CONNECTION')
+        );
+        
+    -------------------------------------------------------------------------------------------------------
+--this code is excluding national account cust_id's that were asked to be removed from repeats
+    -------------------------------------------------------------------------------------------------------
+        del
+        from ntl_prd_qmtmptbls.detail_tblcalls as b
+        where exists(
+        sel
+1
+        from (select a.cust_id from ntl_prd_qmtmptbls.detail_tblcalls as a
+        inner join  ntl_prd_qmtbls.Nation_Acct_Exclude as b
+        on a.cust_id = b.cust_id
+        inner join ntl_prd_qmtbls.orig_dept_repeat_Link_emh as rcd
+        on a.acss_dept_id = rcd.orig_dept_id
+        where rcd.orig_dept_type = 'CS' 
+        ) as a
+        where b.cust_id = a.cust_id 
+        );
+        
+    -------------------------------------------------------------------------------------------------------
+    --Second to last Step to create what will be the repeat data for the reporting
+    -------------------------------------------------------------------------------------------------------
+   
+    create multiset table ntl_prd_qmtmptbls.tblaccountable_calls
+    
+    as(
+    select  
+        calldate
+        ,mtn
+        ,cust_id
+        ,acct_num
+        ,cust_line_seq_id
+        ,acss_call_dt
+        ,acss_call_tm
+        ,hr_emp_id
+        ,emp_id
+        ,acss_user_id
+        ,acss_area 
+        ,acss_call_ctr_cd
+        ,acss_call_ctr_desc
+        ,acss_dept_desc
+        ,acss_dept_id
+        ,acss_call_id
+        ,acd_call_id
+        ,ivr_call_id
+        ,acss_call_type_cd
+        ,acss_call_type_desc
+        ,acss_dt_start
+        ,acss_tm_start
+        ,callstartdtm
+        ,callstartdtm_est
+        ,acss_dt_disc
+        ,acss_tm_disc
+        ,calldisconnectdtm
+        ,acss_dt_end
+        ,acss_tm_end
+        ,callenddtm
+        ,callenddtm_est
+        ,acss_call_ctr_time_zn 
+        ,state_cd
+        ,calldisconnectdtm_est
+        ,rown           as accountable
+     
+    from (select
+        calldate
+        ,mtn
+        ,cust_id
+        ,acct_num
+        ,cust_line_seq_id
+        ,acss_call_dt
+        ,acss_call_tm
+        ,hr_emp_id
+        ,emp_id
+        ,acss_user_id
+        ,acss_area 
+        ,acss_call_ctr_cd
+        ,acss_call_ctr_desc
+        ,acss_dept_desc
+       ,acss_dept_id
+        ,acss_call_id
+        ,acd_call_id
+        ,ivr_call_id
+        ,acss_call_type_cd
+        ,acss_call_type_desc
+        ,acss_dt_start
+        ,acss_tm_start
+        ,callstartdtm
+        ,callstartdtm_est
+        ,acss_dt_disc
+        ,acss_tm_disc
+        ,calldisconnectdtm
+        ,acss_dt_end
+        ,acss_tm_end
+        ,callenddtm
+        ,callenddtm_est
+        ,acss_call_ctr_time_zn 
+        ,state_cd
+        ,case when coalesce(calldisconnectdtm_est,callenddtm_est) >= callstartdtm_est
+        then coalesce(calldisconnectdtm_est,callenddtm_est,callstartdtm_est)
+        else coalesce(callenddtm_est,callstartdtm_est)
+        end                         as calldisconnectdtm_est
+        ,row_number() over(partition by ivr_call_id
+        order by  case when coalesce(calldisconnectdtm_est,callenddtm_est) >= callstartdtm_est
+        then coalesce(calldisconnectdtm_est,callenddtm_est,callstartdtm_est)
+        else coalesce(callenddtm_est,callstartdtm_est)
+        end 
+        desc,acss_call_id asc)               as  rown
+
+    from ntl_prd_qmtmptbls.detail_tblcalls
+
+    ---this where statement is finding all the valid ivr id's in the data
+
+    where acss_call_type_cd  not in (4,5,13,16)  ---excluding call types that are not included in repeat calculation 
+        and length(ivr_call_id) = 10  ---looking for only valid ivr call id's 
+            and substr(mtn,7,4) <> '7626' ---removing particular mtn digits that are used primarily for prepaid 
+                and mtn > 0
+                    and calldate >= '2016-09-01'
+                        and calldate < '2016-11-01'
+    ) as a  
+
+    inner join ntl_prd_qmtbls.orig_dept_repeat_Link_emh as rcd --This is only returning Departments that Fall under the Care Umbrella 
+    on (
+    a.acss_dept_id = rcd.orig_dept_id
+    )
+
+    where rown = 1
+    and rcd.orig_dept_type = 'CS'
+    
+    union 
+
+    select 
+        calldate
+        ,mtn
+        ,cust_id
+        ,acct_num
+        ,cust_line_seq_id
+        ,acss_call_dt
+        ,acss_call_tm
+        ,hr_emp_id
+        ,emp_id
+        ,acss_user_id
+        ,acss_area 
+        ,acss_call_ctr_cd
+        ,acss_call_ctr_desc
+        ,acss_dept_desc
+        ,acss_dept_id
+        ,acss_call_id
+        ,acd_call_id
+        ,ivr_call_id
+        ,acss_call_type_cd
+        ,acss_call_type_desc
+        ,acss_dt_start
+        ,acss_tm_start
+        ,callstartdtm
+        ,callstartdtm_est
+        ,acss_dt_disc
+        ,acss_tm_disc
+        ,calldisconnectdtm
+        ,acss_dt_end
+        ,acss_tm_end
+        ,callenddtm
+        ,callenddtm_est
+        ,acss_call_ctr_time_zn 
+        ,state_cd
+        ,calldisconnectdtm_est
+       , cast(1 as smallint)               as accountable
+      
+    from (select
+        calldate
+        ,mtn
+        ,cust_id
+        ,acct_num
+        ,cust_line_seq_id
+        ,acss_call_dt
+        ,acss_call_tm
+        ,hr_emp_id
+        ,emp_id
+        ,acss_user_id
+        ,acss_area 
+        ,acss_call_ctr_cd
+        ,acss_call_ctr_desc
+        ,acss_dept_desc
+        ,acss_dept_id
+        ,acss_call_id
+        ,acd_call_id
+        ,ivr_call_id
+        ,acss_call_type_cd
+        ,acss_call_type_desc
+        ,acss_dt_start
+        ,acss_tm_start
+        ,callstartdtm
+        ,callstartdtm_est
+        ,acss_dt_disc
+        ,acss_tm_disc
+        ,calldisconnectdtm
+        ,acss_dt_end
+        ,acss_tm_end
+        ,callenddtm
+        ,callenddtm_est
+        ,acss_call_ctr_time_zn 
+        ,state_cd
+        ,case when coalesce(calldisconnectdtm_est,callenddtm) >= callstartdtm_est
+        then coalesce(calldisconnectdtm_est,callenddtm_est,callstartdtm)
+        else coalesce(callenddtm_est,callstartdtm_est)
+        end                                 as calldisconnectdtm_est
+
+
+    from (select
+        ac.calldate
+        ,ac.mtn
+        ,ac.cust_id
+        ,ac.acct_num
+        ,ac.cust_line_seq_id
+        ,ac.acss_call_dt
+        ,ac.acss_call_tm
+        ,ac.hr_emp_id
+        ,ac.emp_id
+        ,ac.acss_user_id
+        ,ac.acss_area 
+        ,ac.acss_call_ctr_cd
+        ,ac.acss_call_ctr_desc
+        ,ac.acss_dept_desc
+        ,ac.acss_dept_id
+        ,ac.acss_call_id
+        ,ac.acd_call_id
+        ,ac.ivr_call_id
+        ,ac.acss_call_type_cd
+        ,ac.acss_call_type_desc
+        ,ac.acss_dt_start
+        ,ac.acss_tm_start
+        ,ac.callstartdtm
+        ,ac.callstartdtm_est
+        ,ac.acss_dt_disc
+        ,ac.acss_tm_disc
+        ,ac.calldisconnectdtm
+        ,ac.calldisconnectdtm_est
+        ,ac.acss_dt_end
+        ,ac.acss_tm_end
+        ,ac.callenddtm
+        ,ac.callenddtm_est
+        ,ac.acss_call_ctr_time_zn 
+        ,ac.state_cd
+   
+    from ntl_prd_qmtmptbls.detail_tblcalls as ac
+
+    ---this where statement is looking where the ivr is incomplete or broken and deferring to acd id 
+
+    where ac.acss_call_type_cd  not in (4,5,13,16) ---excluding call types that are not included in repeat calculation 
+    and substr(mtn,7,4) <> '7626'  ---removing particular mtn digits that are used primarily for prepaid 
+        and ac.mtn > 0
+            and calldate >= '2016-09-01'
+                and calldate < '2016-11-01'
+                    and (length(case when ivr_call_id is null then 0 else ivr_call_id end) < 10  ---look at where the ivr is incomplete less than 10  
+                        and acd_call_id > 0
+                            and ac.acss_call_type_cd not in (3,6,10))
+
+    ) as c ) as a     
+    
+    inner join ntl_prd_qmtbls.orig_dept_repeat_Link_emh as rcd  ---This is only returning Departments that Fall under the Care Umbrella 
+    on (
+    a.acss_dept_id = rcd.orig_dept_id
+    )
+    
+    where rcd.orig_dept_type = 'CS'
+   
+           )    
+    with data
+    primary index (mtn, cust_id, cust_line_seq_id, acss_call_id, ivr_call_id, calldate)
+    index(calldate);
+    
+    -------------------------------------------------------------------------------------------------------
+    ---Creates union between Chat Interactions and CS calls for repeat call step 2
+    -------------------------------------------------------------------------------------------------------
+
+        create multiset table ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat
+        
+    as(
+    select
+    a.start_dt              as calldate,
+    
+    a.dt_tm                 as callstartdtm_est,
+    
+    b.field_label,
+    
+    b.servicearea_desc,
+    
+    b.callcenter_type,
+    
+    b.callcenter_desc,
+    
+    a.skill_type,
+    
+    a.mtn,
+    
+    a.cust_id,
+    
+    a.cust_line_seq_id,
+    
+    a.nt_user_id         as acss_user_id,
+    
+    b.emp_id,
+    
+    b.dp_skillgroup_label,
+    
+    b.function_desc,
+    
+   'No_Billing'                   as Chat_Type_Call,  --- This was just used to identify calls that were per Chat vs. IVR/Billing system used.
+   
+       cast (dt_tm as timestamp(0))                         as time_stamp_start,
+    
+    cast('2010-01-01'  as date)                            as base_date,
+    
+    cast(((start_dt  - base_date) * 86400
+    + (extract(hour from time_stamp_start) * 3600)
+    
+    + (extract(minute from time_stamp_start) * 60)
+    
+    + (extract(second from time_stamp_start))) as varchar(10))           as string,
+    
+     a.key_id    ---This key was created to come up with a replacement for acss_call_id
+
+    
+from ntl_prd_qmtmptbls.echat_detail1 as a
+    
+left join ntl_prd_qmtbls.kelchfr_emp_info as b on 
+(
+a.nt_user_id = b.nt_userid
+and a.start_dt between b.eff_dt and b.exp_dt
+)
+
+where a.start_dt >= '2016-09-01' 
+and cust_id is not null
+
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+
+
+union
+
+select
+
+    a.calldate,
+    
+    a.callstartdtm_est,
+    
+    b.field_label,
+    
+    b.servicearea_desc,
+    
+    b.callcenter_type,
+    
+    b.callcenter_desc,
+    
+    cast('?' as varchar(15))                       as skill_type,
+    
+    a.mtn,
+    
+    a.cust_id,
+    
+    a.cust_line_seq_id,
+    
+    a.acss_user_id,
+    
+    b.emp_id,
+    
+    b.dp_skillgroup_label,
+    
+    b.function_desc,
+    
+    'Yes_Billing' as Chat_Type_Call,
+    
+    cast (a.callstartdtm_est as timestamp(0))                as time_stamp_start,
+    
+    cast('2010-01-01'  as date)                                         as base_date,
+    
+    cast(((a.calldate  - base_date) * 86400
+    + (extract(hour from time_stamp_start) * 3600)
+    
+    + (extract(minute from time_stamp_start) * 60)
+    
+    + (extract(second from time_stamp_start))) as varchar(10))               as string,
+    
+    (a.cust_id||a.cust_line_seq_id||string||a.acss_user_id)                       as key_id   ---This key was created to come up with a replacement for acss_call_id
+    
+    from ntl_prd_qmtmptbls.tblaccountable_calls as a
+    
+    inner join ( select distinct cust_id, cust_line_seq_id
+    
+        from ntl_prd_qmtmptbls.echat_detail1
+        
+        ) as a1     ---This subselect was used to pull out all of the customers that had interactions with the Chat reps that went through other departments like; Tech, Care, Bilingual, etc
+        
+        on (
+        a.cust_id = a1.cust_id
+        and a.cust_line_seq_id = a1.cust_line_seq_id
+        )
+
+    left join ntl_prd_qmtbls.kelchfr_emp_info as b on 
+    (
+    a.acss_user_id = b.nt_userid
+    and a.calldate between b.eff_dt and b.exp_dt
+    )
+
+    where a.calldate >= '2016-09-01'
+    
+    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+    
+             )    
+    with data
+    primary index (mtn, cust_id, cust_line_seq_id,calldate,key_id)
+    index(calldate);
+    
+     -------------------------------------------------------------------------------------------------------
+    ---This was created to try a ranking for repeat connection 11-21-16
+    -------------------------------------------------------------------------------------------------------
+    
+    create multiset table ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat_a
+    
+    as(
+    select a.*
+
+    from (select a.*,
+
+        rank() over (partition by cust_id, cust_line_seq_id
+        
+        order by calldate, cust_id, cust_line_seq_id, callstartdtm_est) as rnk
+
+    from  ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat as a
+
+    ) as a 
+    
+                 )    
+    with data
+    primary index (mtn, cust_id, cust_line_seq_id,calldate)
+    index(calldate);
+    
+     -------------------------------------------------------------------------------------------------------
+    ---This process takes the accountable chat data and then creates a functional connection to create repeat base and then final results. 
+    -------------------------------------------------------------------------------------------------------
+    
+    select 
+        
+        c.calldate-extract(day from c.calldate)+1                   as chat_month,
+        
+        c.calldate as chatdate, 
+        
+        c.field_label,
+        
+        c.servicearea_desc,
+        
+        c.callcenter_type as chatcenter_type,
+        
+        c.callcenter_desc as chatcenter_desc,     
+        
+        coalesce(e.nm_last||', '||e.nm_first ,'unknown_rep')   as rep_nm,
+        
+        coalesce(e.super_nm_lvl2, 'unknown_sup_nm')         as sup_nm,
+        
+        coalesce(e.super_nm_lvl1, 'unknown_sr_mgr_nm')   as sr_mgr_nm,
+        
+        c.emp_id,
+        
+        c.acss_user_id,
+        
+        c.dp_skillgroup_label,
+        
+        c.function_desc,
+
+        count(*) as totalchats,
+        
+        coalesce(sum(repeat_2hr),0)                                   as Repeats_2hr,
+        
+        coalesce(sum(repeat_sameday),0)                        as repeat_sameday,
+        
+        coalesce(sum(repeat_3day),0)                               as repeat_3day,
+        
+        coalesce(sum(repeat_7day),0)                               as repeat_7day,
+        
+        coalesce(sum(repeat_15day),0)                             as repeat_15day,
+        
+        coalesce(sum( repeat_31day),0)                            as  repeat_31day
+
+    from ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat_a as c
+
+    left join ntl_prd_allvm.employee_contractor_hist_v as e on 
+    (
+    c.acss_user_id = e.nt_user_id
+    and c.calldate between e.eff_dt and e.exp_dt
+    )
+
+
+    left join (select 
+        c.calldate,
+        
+        c.cust_id,
+        
+        c.cust_line_seq_id,
+        
+        c.mtn,
+        
+        c.callstartdtm_est,
+        
+        r.calldate as repeatdate,
+        
+        r.callstartdtm_est as repeatstartdtm_est,
+        
+        case when r.callstartdtm_est is not null then
+
+              ((r.callstartdtm_est - c.callstartdtm_est) day(4) to minute ) end tsdiff,
+
+            case when r.callstartdtm_est is not null then
+
+              (extract(hour from tsdiff) * 60)
+
+              + extract(minute from tsdiff)
+
+              + (cast((cast ((tsdiff) as interval day)) as integer) * 1440) end repeat_interval,
+              
+              cast(r.callstartdtm_est as date) - cast(c.callstartdtm_est as date)                                         as day_diff,
+              
+              c.acss_user_id,
+              
+              c.emp_id,
+              
+              c.key_id,
+              
+              sum(case when repeat_interval>= 0 and repeat_interval < 120 then 1 else 0 end)         as repeat_2hr,
+
+             sum(case when repeat_interval >= 0 and  day_diff < 1   then 1 else 0 end)                       as repeat_sameday,
+             
+             sum(case when repeat_interval >= 0 and day_diff < 3   then 1 else 0 end)                        as repeat_3day,
+             
+             sum(case when repeat_interval >= 0 and  day_diff  < 7   then 1 else 0 end)                      as repeat_7day,
+             
+             sum(case when repeat_interval >= 0 and day_diff < 15  then 1 else 0 end)                       as repeat_15day,
+             
+             sum(case when repeat_interval >= 0 and day_diff < 31  then 1 else 0 end)                       as repeat_31day
+    
+    
+    from ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat_a as c
+    
+    inner join ntl_prd_qmtmptbls.tblRepeat_Call_Wth_Chat_a as r on 
+    (
+    c.cust_id = r.cust_id
+    and c.cust_line_seq_id = r.cust_line_seq_id
+    and r.callstartdtm_est > c.callstartdtm_est
+    and r.rnk = c.rnk + 1
+    and c.key_id <> r.key_id   
+    and c.acss_user_id <> r.acss_user_id
+    )
+    
+    group by 1,2,3,4,5,6,7,8,9,10,11,12,13
+    
+    ) as r on 
+    (
+    c.calldate = r.calldate
+    and c.key_id = r.key_id 
+    and c.cust_id = r.cust_id
+    and c.cust_line_seq_id = r.cust_line_seq_id
+    and c.acss_user_id = r.acss_user_id
+    )
+    
+     where c.calldate >= '2016-09-01'
+        and c.calldate < '2016-10-01'
+            and c.dp_skillgroup_label like '%Chat%'
+    
+    group by 1,2,3,4,5,6,7,8,9,10,11,12,13;
