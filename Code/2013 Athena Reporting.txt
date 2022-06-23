@@ -1,0 +1,661 @@
+/* Athena Transactions (MTN)*/
+CREATE TABLE NTL_PRD_QMTMPTBLS.ATHENA_INTERACTION_M10
+AS
+(
+    SELECT
+         CUST_ID
+        ,MTN
+        ,CALL_START_DT
+        ,NT_USER_ID
+      FROM NTL_PRD_ALLVM.TP_ATHENA_INTERACTION_V
+     WHERE CALL_START_DT BETWEEN ?startdate AND ?enddate
+       --AND CALL_START_DT <= @EndDate
+            GROUP BY 1,2,3,4
+)WITH DATA PRIMARY INDEX(CUST_ID, MTN, NT_USER_ID, CALL_START_DT)
+;
+
+/* Athena Transaction (Account) */
+CREATE TABLE NTL_PRD_QMTMPTBLS.ATHENA_INTERACTION_A10
+AS
+(
+    SELECT
+         CUST_ID
+        ,CALL_START_DT
+        ,NT_USER_ID
+      FROM NTL_PRD_ALLVM.TP_ATHENA_INTERACTION_V
+     WHERE CALL_START_DT >= ?startdate
+       AND CALL_START_DT <= ?enddate
+      GROUP BY 1,2,3
+)WITH DATA PRIMARY INDEX(CUST_ID, NT_USER_ID, CALL_START_DT)
+;
+
+
+/* MTN Level OCC's */
+CREATE TABLE NTL_PRD_QMTMPTBLS.ATHENA_MTN_OCC_IDX10
+AS
+(
+    SELECT
+        OCC.TRANS_DT
+       ,OCC.CUST_ID
+       ,OCC.MTN
+       ,OCC.USER_ID
+       ,OCC.MKT_CD
+       ,OCC.RECUR_CREDIT_IND
+       ,OCC.OCC_AMT
+       ,OCC.OCC_STATUS_CD
+       ,OCC.OCC_REAS_CD
+  FROM NTL_PRD_ALLVM.MTN_OCC_TRANS_V OCC
+ WHERE OCC.TRANS_DT BETWEEN ?startdate AND ?enddate
+   --AND OCC.TRANS_DT <= @EndDate
+   AND OCC.OCC_STATUS_CD = 'A'
+   AND OCC.OCC_REAS_CD IN ('97','98','99')
+    
+    )WITH DATA PRIMARY INDEX(USER_ID, TRANS_DT, CUST_ID, MTN) INDEX(MKT_CD)
+;
+
+/* Account level OCC's */
+CREATE TABLE NTL_PRD_QMTMPTBLS.ATHENA_ACC_OCC_IDX10
+AS
+(
+    SELECT
+        OCC.TRANS_DT
+       ,OCC.CUST_ID
+       ,OCC.USER_ID
+       ,OCC.MKT_CD
+       ,OCC.RECUR_CREDIT_IND
+       ,OCC.OCC_AMT
+       ,OCC.OCC_STATUS_CD
+       ,OCC.OCC_REAS_CD
+  FROM NTL_PRD_ALLVM.CUST_ACCT_OCC_TRANS_V OCC
+ WHERE OCC.TRANS_DT BETWEEN ?startdate AND ?enddate
+   --AND OCC.TRANS_DT <= @EndDate
+   AND OCC.OCC_STATUS_CD = 'A'
+   AND OCC.OCC_REAS_CD IN ('97','98','99')
+   
+)WITH DATA PRIMARY INDEX(USER_ID, TRANS_DT, CUST_ID) INDEX(MKT_CD)
+;
+
+/* Create holding zone */
+CREATE TABLE NTL_PRD_QMTMPTBLS.ATHENA_OCC_CALL10
+(
+     TRANS_DT           DATE
+    ,CUST_ID            VARCHAR(15)
+    ,USER_ID            VARCHAR(10)
+    ,RECURRING          VARCHAR(8)
+    ,FILTER             VARCHAR(6)
+    ,TOT_DEBITS_NN      FLOAT
+    ,TOT_CREDITS_NN     FLOAT
+    ,NET_CREDITS_NN     FLOAT
+    ,DEBIT_CNT_NN       FLOAT
+    ,CREDIT_CNT_NN      FLOAT
+    ,IS_NN              INTEGER
+    ,TOT_DEBITS_NE      FLOAT
+    ,TOT_CREDITS_NE     FLOAT
+    ,NET_CREDITS_NE     FLOAT
+    ,DEBIT_CNT_NE       FLOAT
+    ,CREDIT_CNT_NE      FLOAT
+    ,TOT_DEBITS_NS      FLOAT
+    ,TOT_CREDITS_NS     FLOAT
+    ,NET_CREDITS_NS     FLOAT
+    ,DEBIT_CNT_NS       FLOAT
+    ,CREDIT_CNT_NS      FLOAT
+)PRIMARY INDEX(CUST_ID, USER_ID, TRANS_DT)
+;
+
+
+/* Gather MTN Level occ's */
+INSERT INTO NTL_PRD_QMTMPTBLS.ATHENA_OCC_CALL10
+SELECT
+	 A.TRANS_DT
+	,A.CUST_ID
+	,A.USER_ID
+    ,CASE WHEN HR.CITY_NM = 'MANKATO' AND A.RECUR_CREDIT_IND = 'Y' THEN 'RECURRING' ELSE 'SINGLE' END AS RECURRING
+	,CASE WHEN AI.CUST_ID IS NULL THEN 'ICM' ELSE 'ATHENA' END AS FILTER
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT >= 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_DEBITS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT < 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_CREDITS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' THEN A.OCC_AMT ELSE 0 END) AS NET_CREDITS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT >= 0 THEN 1 ELSE 0 END) AS DEBIT_CNT_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT < 0 THEN 1 ELSE 0 END) AS CREDIT_CNT_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' THEN 1 ELSE 0 END) AS IS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT >= 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_DEBITS_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT < 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_CREDITS_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' THEN A.OCC_AMT ELSE 0 END) AS NET_CREDITS_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT >= 0 THEN 1 ELSE 0 END) AS DEBIT_CNT_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT < 0 THEN 1 ELSE 0 END) AS CREDIT_CNT_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT >= 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_DEBITSN_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT < 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_CREDITSN_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' THEN A.OCC_AMT ELSE 0 END) AS NET_CREDITS_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT >= 0 THEN 1 ELSE 0 END) AS DEBIT_CNTN_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT < 0 THEN 1 ELSE 0 END) AS CREDIT_CNTN_NS
+ FROM NTL_PRD_QMTMPTBLS.ATHENA_MTN_OCC_IDX10 A
+ JOIN NTL_PRD_ALLVM.MARKET_V M
+   ON A.MKT_CD = M.MKT_CD
+ JOIN NTL_PRD_ALLVM.EMPLOYEE_CONTRACTOR_HIST_V HR
+   ON A.USER_ID = HR.NT_USER_ID
+  AND A.TRANS_DT >= HR.EFF_DT
+  AND A.TRANS_DT <= HR.EXP_DT
+ LEFT JOIN NTL_PRD_QMTMPTBLS.ATHENA_INTERACTION_M10 AI
+   ON A.USER_ID = AI.NT_USER_ID
+  AND A.CUST_ID = AI.CUST_ID
+  AND A.MTN = AI.MTN
+  AND A.TRANS_DT = AI.CALL_START_DT
+WHERE M.MANAGED_IND = 'C'
+GROUP BY 1,2,3,4,5
+;
+
+
+/* Gather Account level occ's */
+INSERT INTO NTL_PRD_QMTMPTBLS.ATHENA_OCC_CALL10
+SELECT
+	 A.TRANS_DT
+	,A.CUST_ID
+	,A.USER_ID
+    ,CASE WHEN HR.CITY_NM = 'MANKATO' AND A.RECUR_CREDIT_IND = 'Y' THEN 'RECURRING' ELSE 'SINGLE' END AS RECURRING
+	,CASE WHEN AI.CUST_ID IS NULL THEN 'ICM' ELSE 'ATHENA' END AS FILTER
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT >= 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_DEBITS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT < 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_CREDITS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' THEN A.OCC_AMT ELSE 0 END) AS NET_CREDITS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT >= 0 THEN 1 ELSE 0 END) AS DEBIT_CNT_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' AND A.OCC_AMT < 0 THEN 1 ELSE 0 END) AS CREDIT_CNT_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '99' THEN 1 ELSE 0 END) AS IS_NN
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT >= 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_DEBITS_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT < 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_CREDITS_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' THEN A.OCC_AMT ELSE 0 END) AS NET_CREDITS_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT >= 0 THEN 1 ELSE 0 END) AS DEBIT_CNT_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '98' AND A.OCC_AMT < 0 THEN 1 ELSE 0 END) AS CREDIT_CNT_NE
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT >= 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_DEBITSN_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT < 0 THEN A.OCC_AMT ELSE 0 END) AS TOT_CREDITSN_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' THEN A.OCC_AMT ELSE 0 END) AS NET_CREDITS_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT >= 0 THEN 1 ELSE 0 END) AS DEBIT_CNTN_NS
+	,SUM(CASE WHEN A.OCC_REAS_CD = '97' AND A.OCC_AMT < 0 THEN 1 ELSE 0 END) AS CREDIT_CNTN_NS
+ FROM NTL_PRD_QMTMPTBLS.ATHENA_ACC_OCC_IDX10 A
+ JOIN NTL_PRD_ALLVM.MARKET_V M
+   ON A.MKT_CD = M.MKT_CD
+ JOIN NTL_PRD_ALLVM.EMPLOYEE_CONTRACTOR_HIST_V HR
+   ON A.USER_ID = HR.NT_USER_ID
+  AND A.TRANS_DT >= HR.EFF_DT
+  AND A.TRANS_DT <= HR.EXP_DT
+ LEFT JOIN NTL_PRD_QMTMPTBLS.ATHENA_INTERACTION_A10 AI
+   ON A.USER_ID = AI.NT_USER_ID
+  AND A.CUST_ID = AI.CUST_ID
+  AND A.TRANS_DT = AI.CALL_START_DT
+WHERE M.MANAGED_IND = 'C'
+GROUP BY 1,2,3,4,5
+;
+
+CREATE VOLATILE TABLE athena_metrics_v10 , NO LOG
+(
+RPT_DATE						DATE
+,NT_USER_ID					VARCHAR(10)
+,EMP_FUNC					VARCHAR(35)
+,CALL_TYPE					VARCHAR(10)
+,TOTAL_CALLS					INTEGER
+,ICM_CALLS						INTEGER
+,ATHENA_CALLS				INTEGER
+,ICM_OCC_CALLS				INTEGER
+,ATHENA_OCC_CALLS		INTEGER
+,HNDL_TM						FLOAT
+,OFFER_DISC				INTEGER
+,PROP_ACCP				INTEGER
+,NEGOTIATE					INTEGER
+,OPPORTUNITY				INTEGER
+,NOT_DISCSSD				INTEGER
+,TOT_OFFERS				INTEGER
+,A_SESSIONS				INTEGER
+,REPEAT_3D					INTEGER
+,ACSS						INTEGER
+,CREDIT_CT_97_98_99				INTEGER
+,Credit_CT_99					INTEGER
+,OCC_Net_Credits_97_98_99						FLOAT
+,OCC_Net_Credits_99						FLOAT
+,RR							INTEGER
+,RRT						INTEGER
+,ERP						INTEGER
+,ERPT						INTEGER
+,NPS						INTEGER
+,NPST						INTEGER
+)
+PRIMARY INDEX (NT_USER_ID)
+ON COMMIT PRESERVE ROWS;
+
+--End Statement 3
+
+INSERT INTO athena_metrics_v10
+(
+RPT_DATE
+,NT_USER_ID	
+,CALL_TYPE
+,TOTAL_CALLS
+,ICM_CALLS
+,ATHENA_CALLS
+,ICM_OCC_CALLS
+,ATHENA_OCC_CALLS
+,HNDL_TM
+,OFFER_DISC
+,PROP_ACCP
+,NEGOTIATE
+--,OPPORTUNITY
+,NOT_DISCSSD
+,TOT_OFFERS
+,ACSS
+,CREDIT_CT_97_98_99
+,Credit_CT_99
+,OCC_Net_Credits_97_98_99
+,OCC_Net_Credits_99
+)
+
+SELECT
+	CASE WHEN icm.call_answer_dt > (?enddate - 3) THEN icm.call_answer_dt 
+		ELSE icm.call_answer_dt - EXTRACT(DAY FROM icm.call_answer_dt) +1 END AS RPT_DATE
+	,acv.acss_user_id
+	,'ATHENA' AS CALL_TYPE
+	,COUNT(icm.cust_id) AS TOTAL_CALLS
+	,SUM(CASE WHEN tpa.cust_id IS NULL THEN 1 ELSE 0 END) AS ICM_CALLS
+	,SUM(CASE WHEN tpa.cust_id IS NULL THEN 0 ELSE 1 END) AS ATHENA_CALLS
+	,SUM(CASE WHEN tpa.cust_Id IS NULL AND occ.fltr > 0 THEN 1 ELSE 0 END) AS ICM_AHT_CALLS
+	,SUM(CASE WHEN tpa.cust_id IS NOT NULL AND occ.fltr > 0 THEN 1 ELSE 0 END) AS ATHENA_AHT_CALLS
+	,SUM(icm.hold_tm_seconds + icm.talk_tm_seconds + icm.work_tm_seconds) AS HNDL_TM
+	,SUM(tpa.total_offers - tpa.not_discussed) AS OFFER_DISC
+	,SUM(tpa.accepted) AS PROP_ACCP
+	,SUM(tpa.negotiate) AS NEGOTIATE
+	--,SUM(tpa.opportunity) AS OPPORTUNE
+	,SUM(tpa.not_discussed) AS NOT_DCSSD
+	,SUM(tpa.total_offers) AS TOT_OFFERS
+																		,SUM(CASE WHEN occ.Credit_CT IS NOT NULL THEN occ.Credit_CT - tpa.OFFER_COST ELSE 0 END) AS ACSS
+	,SUM(OCC.CREDIT_CTN) AS CREDIT_CNTN
+	,SUM(OCC.CREDIT_CT) AS CREDIT_CNT
+	,SUM(OCC.NET_CREDITN) AS NET_CRN
+	,SUM(OCC.NET_CREDIT) AS NET_CR
+
+FROM
+	ICM_SUMMARY_FACT_V icm
+	
+	JOIN ACSS_CALL_V acv
+	ON acv.acss_call_id = icm.acss_call_id
+	
+	LEFT JOIN ECCR_CENTER_V ccr
+	ON ccr.callcenterid = icm.callcenterid_agent
+	
+	LEFT JOIN (
+		SELECT
+			CUST_ID
+			,TRANS_DT
+			,USER_ID
+			,SUM(CREDIT_CNT_NN) AS CREDIT_CT
+			,SUM(NET_CREDITS_NN) AS NET_CREDIT
+			,SUM(CREDIT_CNT_NN+CREDIT_CNT_NE+CREDIT_CNT_NS) AS CREDIT_CTN
+			,SUM(NET_CREDITS_NN+NET_CREDITS_NE+NET_CREDITS_NS) AS NET_CREDITN
+			,SUM(IS_NN) AS FLTR
+		FROM
+			NTL_PRD_QMTMPTBLS.ATHENA_OCC_CALL10
+		GROUP BY
+			1,2,3) occ
+	ON occ.cust_id = icm.cust_id
+	AND occ.trans_dt = icm.call_answer_dt
+	AND occ.user_id = acv.acss_user_id
+	
+	JOIN (
+		SELECT
+			MTN
+			,CUST_ID
+			,CALL_START_DT
+			,NT_USER_ID
+			--,SUM(CASE WHEN CALL_END_DT IS NULL THEN 1 ELSE 0 END) AS OPPORTUNITY
+			,SUM(CASE WHEN RESP_TO_OFFER_STATUS = 'Negotiate' THEN 1 ELSE 0 END) AS NEGOTIATE
+			,SUM(CASE WHEN RESP_TO_OFFER_STATUS = 'Accept' THEN 1 ELSE 0 END) AS ACCEPTED
+			,SUM(CASE WHEN RESP_TO_OFFER_STATUS = 'Discussed' THEN 1 ELSE 0 END) AS DISCUSSED
+			,SUM(CASE WHEN RESP_TO_OFFER_STATUS = 'Not Discussed' THEN 1 ELSE 0 END) AS NOT_DISCUSSED
+			,SUM(CASE WHEN RESP_TO_OFFER_STATUS IS NOT NULL THEN 1 ELSE 0 END) AS TOTAL_OFFERS
+			,SUM(CASE WHEN OFFER_COST_TO_VZW_AMT >0 THEN 1 ELSE 0 END) AS OFFER_COST
+		FROM
+			TP_ATHENA_INTERACTION_V
+		WHERE
+			CUST_ID IS NOT NULL
+		GROUP BY
+			1,2,3,4) tpa
+	ON tpa.cust_id = acv.cust_id
+	AND tpa.mtn = acv.mtn
+	AND tpa.nt_user_id = acv.acss_user_id
+	AND tpa.call_start_dt = acv.call_start_dt
+
+WHERE
+	icm.eccr_dept_nm IN('Care','Tech','Bilingual')
+	AND icm.call_answer_dt BETWEEN ?startdate AND ?enddate
+	AND icm.call_answer_tm IS NOT NULL
+	AND icm.call_end_tm IS NOT NULL
+	
+GROUP BY
+	1,2,3
+;
+
+--End Statement 4
+
+INSERT INTO athena_metrics_v10
+(
+RPT_DATE
+,NT_USER_ID
+,CALL_TYPE
+,TOTAL_CALLS
+,ICM_CALLS
+,ATHENA_CALLS
+,ICM_OCC_CALLS
+,ATHENA_OCC_CALLS
+,HNDL_TM
+,CREDIT_CT_97_98_99
+,Credit_CT_99
+,OCC_Net_Credits_97_98_99
+,OCC_Net_Credits_99
+)
+
+SELECT
+	CASE WHEN icm.call_answer_dt > (?enddate - 3) THEN icm.call_answer_dt 
+		ELSE icm.call_answer_dt - EXTRACT(DAY FROM icm.call_answer_dt) +1 END AS RPT_DATE
+	,acv.acss_user_id AS NT_USER_ID
+	,'ICM' AS CALL_TYPE
+	,COUNT(icm.cust_id) AS TOTAL_CALLS
+	,SUM(CASE WHEN tpa.cust_id IS NULL THEN 1 ELSE 0 END) AS ICM_CALLS
+	,SUM(CASE WHEN tpa.cust_id IS NULL THEN 0 ELSE 1 END) AS ATHENA_CALLS
+	,SUM(CASE WHEN tpa.cust_Id IS NULL AND occ.fltr > 0 THEN 1 ELSE 0 END) AS ICM_AHT_CALLS
+	,SUM(CASE WHEN tpa.cust_id IS NOT NULL AND occ.fltr > 0 THEN 1 ELSE 0 END) AS ATHENA_AHT_CALLS
+	,SUM(icm.hold_tm_seconds + icm.talk_tm_seconds + icm.work_tm_seconds) AS HNDL_TM
+   	,SUM(OCC.CREDIT_CTN) AS CREDIT_CNTN
+   	,SUM(OCC.CREDIT_CT) AS CREDIT_CNT
+	,SUM(OCC.NET_CREDITN) AS NET_CRN
+	,SUM(OCC.NET_CREDIT) AS NET_CR
+
+FROM
+	ICM_SUMMARY_FACT_V icm
+	
+	JOIN ACSS_CALL_V acv
+	ON acv.acss_call_id = icm.acss_call_id
+	
+	JOIN (
+		SELECT
+			CUST_ID
+			,TRANS_DT
+			,USER_ID
+			,SUM(CREDIT_CNT_NN) AS CREDIT_CT
+			,SUM(NET_CREDITS_NN) AS NET_CREDIT
+			,SUM(CREDIT_CNT_NN+CREDIT_CNT_NE+CREDIT_CNT_NS) AS CREDIT_CTN
+			,SUM(NET_CREDITS_NN+NET_CREDITS_NE+NET_CREDITS_NS) AS NET_CREDITN
+			,SUM(IS_NN) AS FLTR
+		FROM
+			NTL_PRD_QMTMPTBLS.ATHENA_OCC_CALL10
+		GROUP BY
+			1,2,3) occ
+	ON occ.cust_id = icm.cust_id
+	AND occ.trans_dt = icm.call_answer_dt
+	AND occ.user_id = acv.acss_user_id
+	
+	LEFT JOIN (
+		SELECT
+			MTN
+			,CUST_ID
+			,CALL_START_DT
+			,NT_USER_ID
+		FROM
+			TP_ATHENA_INTERACTION_V
+		WHERE
+			CUST_ID IS NOT NULL
+		GROUP BY
+			1,2,3,4) tpa
+	ON tpa.cust_id = acv.cust_id
+	AND tpa.mtn = acv.mtn
+	AND tpa.nt_user_id = acv.acss_user_id
+	AND tpa.call_start_dt = acv.call_start_dt
+
+WHERE
+	icm.call_answer_dt BETWEEN  ?startdate AND ?enddate
+	AND icm.call_answer_tm IS NOT NULL
+	AND icm.call_end_tm IS NOT NULL
+	AND tpa.cust_id IS NULL
+	
+GROUP BY
+	1,2,3
+;
+
+--End Statement 5
+
+INSERT INTO athena_metrics_v10
+(
+	RPT_DATE
+	,NT_USER_ID
+	,CALL_TYPE
+	,OPPORTUNITY
+	,A_SESSIONS
+)
+
+SELECT
+	CASE WHEN CALL_START_DT > (?enddate - 3) THEN CALL_START_DT 
+		ELSE CALL_START_DT - EXTRACT(DAY FROM CALL_START_DT) +1 END AS RPT_DATE
+	,NT_USER_ID
+	,'ATHENA' AS CALL_TYPE
+	,SUM(OPPORTUNITY) AS OPPTNTY
+	,SUM(TOT_SESSIONS) AS ATHENA_SESS
+
+FROM
+	(
+	SELECT
+		CUST_ID
+		,CALL_START_DT
+		,CALL_START_TM
+		,NT_USER_ID
+		,CASE WHEN CALL_END_DT IS NULL THEN 1 ELSE 0 END AS OPPORTUNITY
+		,'1' AS TOT_SESSIONS
+
+	FROM
+		NTL_PRD_ALLVM.TP_ATHENA_INTERACTION_V
+		
+	WHERE
+		NT_USER_ID IS NOT NULL
+		AND call_start_dt BETWEEN ?startdate AND ?enddate
+		
+	GROUP BY
+		1,2,3,4,5)a
+
+GROUP BY
+	1,2,3
+;
+
+--End Statement 6
+
+INSERT INTO athena_metrics_v10
+(
+	RPT_DATE
+	,NT_USER_ID
+	,CALL_TYPE
+	,RR
+	,RRT
+	,ERP
+	,ERPT
+	,NPS
+	,NPST
+)
+
+SELECT
+        CASE WHEN acs.offer_dt > (?enddate -3) THEN acs.offer_dt
+                                ELSE acs.offer_dt - EXTRACT(DAY FROM acs.offer_dt) +1 END AS RPT_DT
+        ,ech.nt_user_id AS NT_USER_ID
+        ,'ATHENA' AS CALL_TYPE
+        ,SUM(acs.rep_resolved_yes) AS RR_Pass
+        ,SUM(acs.rep_resolved_total) AS RR_Total
+        ,SUM(acs.erp_top) AS ERP_Pass
+        ,SUM(acs.erp_total) AS ERP_Total
+        ,SUM(acs.promoter-acs.detractor) AS NPS_Pass
+        ,SUM(acs.nps_survey) AS NPS_Total
+                
+FROM
+    ntl_prd_qmtbls.rcj568_acs_dtl acs
+    
+    JOIN EMPLOYEE_CONTRACTOR_HIST_V ech
+    ON ech.EMP_ID = acs.EMP_ID
+    AND acs.offer_dt BETWEEN ech.eff_dt AND ech.exp_dt
+    
+    JOIN (SELECT
+			a.MTN
+			,a.CUST_ID
+			,a.CALL_START_DT
+			,a.NT_USER_ID
+		
+		FROM
+			TP_ATHENA_INTERACTION_V a
+			
+		GROUP BY
+			1,2,3,4) tpa
+        ON tpa.nt_user_id = ech.nt_user_id
+        AND tpa.call_start_dt = acs.offer_dt
+        AND tpa.cust_id = acs.cust_id
+        AND tpa.mtn = acs.mtn
+                
+WHERE
+    acs.OFFER_DT BETWEEN ?startdate AND ?enddate
+                
+GROUP BY
+    1,2
+;
+
+--End Statement 7
+
+INSERT INTO athena_metrics_v10
+(
+	RPT_DATE
+	,NT_USER_ID
+	,CALL_TYPE
+	,RR
+	,RRT
+	,ERP
+	,ERPT
+	,NPS
+	,NPST
+)
+
+SELECT
+    CASE WHEN acs.offer_dt > (?enddate -3) THEN acs.offer_dt
+                                ELSE acs.offer_dt - EXTRACT(DAY FROM acs.offer_dt) +1 END AS RPT_DT
+    ,ech.nt_user_id  
+    ,'ICM' AS CALL_TYPE
+    ,SUM(acs.rep_resolved_yes) AS RR_Pass
+    ,SUM(acs.rep_resolved_total) AS RR_Total
+    ,SUM(acs.erp_top) AS ERP_Pass
+    ,SUM(acs.erp_total) AS ERP_Total
+    ,SUM(acs.promoter-acs.detractor) AS NPS_Pass
+    ,SUM(acs.nps_survey) AS NPS_Total
+                
+FROM
+    ntl_prd_qmtbls.rcj568_acs_dtl acs
+    
+    JOIN EMPLOYEE_CONTRACTOR_HIST_V ech
+    ON ech.EMP_ID = acs.EMP_ID
+    AND acs.offer_dt BETWEEN ech.eff_dt AND ech.exp_dt
+    
+    JOIN (SELECT
+    				TRANS_DT
+    				,USER_ID
+    				,CUST_ID
+    			FROM
+    				NTL_PRD_QMTMPTBLS.ATHENA_OCC_CALL10
+    			WHERE
+    				filter = 'ICM'
+    			GROUP BY
+    				1,2,3) tcc
+    ON tcc.trans_dt = acs.offer_dt
+    AND tcc.user_id = ech.nt_user_id  
+    AND tcc.cust_id = acs.cust_id              
+                
+WHERE
+    acs.OFFER_DT BETWEEN ?startdate AND ?enddate
+                
+GROUP BY
+    1,2,3
+;
+
+--End Statement 8
+
+SELECT
+	(A.RPT_DATE - EXTRACT(DAY FROM A.RPT_DATE)+1) AS RPT_MONTH
+ --   A.RPT_DATE
+    ,CASE WHEN B.emp_area_cd = 'NE' THEN 'NM' 
+    	WHEN B.city_nm = 'Alpharetta' AND B.postal_cd = '30009' THEN 'SO'
+    	ELSE COALESCE(B.emp_area_cd, 'SPC') END AS AREA_CD
+    ,CASE WHEN B.city_nm = 'Cranberry TWP' THEN 'Cranberry Woods'
+                  WHEN B.city_nm = 'Elgin' AND B.state_cd = 'SC' THEN 'Columbia'
+                  WHEN B.city_nm = 'North Charleston' THEN 'Charleston' 
+                  WHEN B.emp_area_cd IS NULL THEN 'Outsource'
+                  WHEN B.city_nm = 'Alpharetta' AND B.postal_cd = '30009' THEN 'Sanctuary Park'
+                  WHEN B.emp_area_cd IS NULL THEN 'Outsource' 
+                  ELSE B.city_nm END AS CENTER
+    ,CASE WHEN b.dept_id IN('9010','9180') THEN 'Care'
+			WHEN b.dept_id IN('9080','9085','9115') THEN 'Tech'
+			WHEN b.dept_id IN ('9280','9011','9221') THEN 'CRT'
+			WHEN b.dept_fctn_desc IN('OSVCS','OSVAOL','OSVAOL_TCS','OSVCS_TCS','OSVCS2','OSVCS2_TCS','OSVOB', 'OSVOB_TCS') THEN 'Care'
+			WHEN b.dept_fctn_desc IN('OSVTS','OSVTS_TCS') THEN 'Tech'
+			END AS DEPT_FCTN
+    ,COALESCE(A.EMP_FUNC, CASE WHEN b.job_desc IN ('Customer Pro-Customer Svc', 'Customer Pro') AND b.dept_id IN('9010','9180')THEN 'Pro'
+		WHEN b.job_desc IN ('Spec-Customer Svc','Customer Specialist') AND b.dept_id IN('9010','9180') THEN 'Specialist'
+		WHEN b.job_desc IN ('Advocate-Customer Svc', 'Customer Advocate') AND b.dept_id IN('9010','9180') THEN 'Advocate'
+		ELSE 'Standard' END) AS EMP_FUNC
+    ,A.CALL_TYPE 
+    ,SUM(TOTAL_CALLS) AS TOT_CALLS 
+  --,SUM(ICM_CALLS) AS ICM_CALL 
+    ,SUM(ATHENA_CALLS) AS A_CALLS
+  /*  ,SUM(ICM_OCC_CALLS) AS ICM_OCC_CALLS
+    ,SUM(ATHENA_OCC_CALLS) AS A_OCC_CALLS
+    ,SUM(HNDL_TM) AS HT_TIME 
+    ,SUM(OFFER_DISC) AS OFFER_DISC 
+    ,SUM(PROP_ACCP) AS ACCEPT 
+    ,SUM(NEGOTIATE) AS NEGOTIATED 
+    ,SUM(OPPORTUNITY) AS OPPORT 
+    ,SUM(NOT_DISCSSD) AS N_DISCUSSED 
+    ,SUM(TOT_OFFERS) AS TOTAL_OFFERS 
+    ,SUM(A_SESSIONS) AS SESSIONS 
+    ,SUM(REPEAT_3D) AS REPEATS 
+    ,SUM(ACSS) AS ACSS
+    ,SUM(CREDIT_CT_97_98_99) AS CRDT_CT_97_98_99
+    ,SUM(CREDIT_CT_99) AS CRDT_CT_99
+    ,SUM(OCC_NET_CREDITS_97_98_99) AS OCC_NET_CREDITS_97_98_99
+    ,SUM(OCC_NET_CREDITS_99) AS OCC_NET_CREDITS_99
+    ,SUM(RR) AS REPR 
+    ,SUM(RRT) AS REP_TOT 
+    ,SUM(ERP) AS ERP 
+    ,SUM(ERPT) AS ERP_TOT 
+    ,SUM(NPS) AS NPS 
+    ,SUM(NPST) AS NPS_TOT*/
+    ,b.nm_last|| ', '|| b.nm_first
+    ,b.super_nm_lvl2
+    ,b.super_nm_lvl1
+    ,b.emp_id
+     
+FROM
+	athena_metrics_v10 A
+	
+	JOIN EMPLOYEE_CONTRACTOR_HIST_V B
+	ON B.NT_USER_ID = A.NT_USER_ID
+	AND (b.DEPT_FCTN_ID <> 'OSV' OR 
+	(b.emp_area_cd IN ('NE') AND b.DEPT_FCTN_ID = 'CSC'))
+	AND A.RPT_DATE BETWEEN B.EFF_DT AND B.EXP_DT
+       
+WHERE
+	DEPT_FCTN IS NOT NULL
+	AND b.city_nm NOT IN('Folsom','Bellevue','Greenville')
+	AND b.emp_area_cd='NE'
+	--AND B.DEPT_FCTN NOT IN ('CUST- 1 800 Operations B/O','CUST-Executive Relations','CUST-Internet Response Team','CUST-HQCS Performance Rptg')
+
+
+GROUP BY
+	1,2,3,4,5,6,b.nm_last|| ', '|| b.nm_first
+    ,b.super_nm_lvl2
+    ,b.super_nm_lvl1
+    ,b.city_nm
+    ,b.emp_id
+
+
+HAVING
+	SUM(TOTAL_CALLS) > 0
+;
+
+/*DROP TABLE NTL_PRD_QMTMPTBLS.ATHENA_INTERACTION_M10;
+DROP TABLE NTL_PRD_QMTMPTBLS.ATHENA_INTERACTION_A10;
+DROP TABLE NTL_PRD_QMTMPTBLS.ATHENA_MTN_OCC_IDX10;
+DROP TABLE NTL_PRD_QMTMPTBLS.ATHENA_ACC_OCC_IDX10;
+DROP TABLE NTL_PRD_QMTMPTBLS.ATHENA_OCC_CALL10;
+DROP TABLE ATHENA_METRICS_V10; */
