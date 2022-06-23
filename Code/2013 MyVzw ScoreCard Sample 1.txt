@@ -1,0 +1,189 @@
+CREATE VOLATILE TABLE ACALLS AS		
+(SELECT 		
+acall.sor_id,		
+acall.mtn,		
+acall.cust_id,		
+acall.acct_num,	
+cc.acss_area_cd as ctr_area,
+CASE WHEN cc.acss_call_ctr_desc IN ('NE Columbia SC 2', 'NE Columbia SC') THEN 'NE Columbia'		
+ELSE cc.acss_call_ctr_desc END AS Center,	
+cc.acss_call_ctr_type,	
+u.nm_last||', '||u.nm_first AS rep_nm,		
+u.acss_user_id,		
+ad.acss_dept_desc,		
+acall.acss_call_dt,		
+acall.acss_call_id,		
+acall.acss_call_tm,
+COALESCE(sed.departmenttype,'Other') depttype,	     	
+CASE		
+WHEN cc.acss_call_ctr_time_zn LIKE 'M%' THEN		
+acall.acss_call_tm - INTERVAL '1' HOUR		
+WHEN cc.acss_call_ctr_time_zn LIKE 'C%' THEN		
+acall.acss_call_tm - INTERVAL '2' HOUR		
+WHEN cc.acss_call_ctr_time_zn LIKE 'E%' THEN		
+acall.acss_call_tm - INTERVAL '3' HOUR		
+WHEN cc.acss_call_ctr_time_zn LIKE 'H%' THEN		
+acall.acss_call_tm + INTERVAL '5' HOUR		
+ELSE acall.acss_call_tm		
+END acss_call_zn_tm,			
+(acall.call_disconnect_tm - acall.call_start_tm) HOUR TO SECOND (0) AS CALL_DURATION_TM,		
+CAST(	acall.acss_call_dt ||		
+        ' '             ||		
+CAST(acss_call_zn_tm AS CHAR(8)) AS TIMESTAMP(0)) acss_dt_tm		
+		
+		
+FROM  ntl_prd_allvm.acss_call_v AS  acall		
+  		
+JOIN ntl_prd_allvm.acss_user_v AS u		
+ON acall.acss_user_id =  u.acss_user_id		
+  	  	     
+INNER JOIN ntl_prd_allvm.acss_call_center_v AS  cc		
+ON acall.acss_call_ctr_cd = cc.acss_call_ctr_cd		
+  		
+INNER JOIN ntl_prd_allvm.acss_dept_v AS ad		
+ON acall.acss_dept_id = ad.acss_dept_id		
+  		
+LEFT JOIN ntl_prd_qmtbls.emh_eccr_dep AS sed		
+ON ad.acss_dept_id = sed.acssdeptid    		
+  		
+LEFT OUTER JOIN 		
+(SELECT
+acss_call_dt,		
+acss_call_ctr_cd, 		
+acss_dept_id                  		
+FROM ntl_prd_allvm.acss_call_v        		
+WHERE acss_call_dt BETWEEN ADD_MONTHS('?Rpt_Mnth', 0)                          		
+AND ADD_MONTHS('?Rpt_Mnth', 1) + 2		
+AND acss_call_type_cd = '1'                      		
+GROUP BY 1,2,3		
+) AS R		
+ON 	acall.acss_call_dt = r.acss_call_dt	
+AND acall.acss_call_ctr_cd = r.acss_call_ctr_cd	
+AND acall.acss_dept_id = r.acss_dept_id	
+		
+WHERE 		
+acall.sor_id = 'v' 		
+AND acall.cust_line_seq_id IS NOT NULL		
+AND acall.acss_call_dt BETWEEN ADD_MONTHS('?Rpt_Mnth', 0) AND ADD_MONTHS('?Rpt_Mnth', 1) + 2		
+AND COALESCE(sed.departmenttype,'Other') <> 'NA'		
+AND ((acall.acss_call_type_cd IN ('1','7','8')) OR		
+(acall.acss_call_type_cd = '3'		
+AND cc.acss_call_ctr_type = 'O'		
+AND ad.acss_dept_desc NOT LIKE '%offline%'		
+AND R.acss_dept_id IS NULL ))		
+		
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17	
+ 		
+)WITH DATA PRIMARY INDEX (cust_id, acct_num, acss_call_dt)		
+ON COMMIT PRESERVE ROWS;	
+
+CREATE VOLATILE TABLE MyVzw                                        		
+AS(		
+select 		
+(a.login_dt - (extract(day from a.login_dt)-1)) as login_mth,		
+sor_id,		
+cust_id,		
+cust_line_seq_id,		
+acct_num,		
+mtn,		
+case when login_method_cd = '1' then 'MyVzw'		
+when login_method_cd = '2' then 'Handsets'		
+when login_method_cd = '3' then 'ASP'		
+when login_method_cd = '4' then 'MediaStore'		
+else login_method_cd end as Login_method_Desc,		
+login_dt,		
+login_tm,		
+CAST(	a.login_dt ||		
+        ' '             ||	
+CAST(login_tm AS CHAR(8)) AS TIMESTAMP(0)) as Login_dt_tm		
+		
+from NTL_PRD_ALLVM.CUST_ACCT_LINE_LOGON_V as a  		
+		
+where login_mth = '?Rpt_Mnth'	
+		
+)WITH DATA                                         		
+PRIMARY INDEX (cust_id, acct_num, cust_line_seq_id, login_dt)                                             		
+ON COMMIT PRESERVE ROWS;	
+
+
+select
+(a.acss_call_dt - (EXTRACT(DAY FROM a.acss_call_dt) - 1)) rpt_mnth,
+a.Center_Area_Desc,
+a.center,
+a.AD_Nm,            
+a.Supv_Nm,   
+a.rep_nm,
+a.job_desc,
+a.acss_dept_desc,
+count(a.totals) as calls_totals,
+count(distinct(b.cust_id||b.acct_num||b.login_dt)) as myvzw_totals
+
+from (select
+coalesce (case When a.acss_call_ctr_type = 'O' then 'SPC Partner' 
+else null end, case when a.ctr_area = 'nm' then 'Northeast' 
+when a.ctr_area = 'so' then 'South'
+when a.ctr_area = 'mw' then 'Midwest' 
+when a.ctr_area = 'we' then 'West'
+else null end) as Center_Area_Desc,
+a.center,
+coalesce(hr1.nm_last || ', ' || hr1.nm_first, 'Unknown') AS  AD_Nm,            
+coalesce(hr2.nm_last || ', ' || hr2.nm_first, 'Unknown') AS Supv_Nm,    
+a.rep_nm,
+coalesce(hr.job_desc, 'Unknown') as job_desc,
+a.acss_dept_desc,
+a.cust_id,
+a.acct_num,
+a.acss_call_dt,
+a.acss_dt_tm,
+count(distinct(a.acss_call_id)) as totals
+
+
+from  acalls as a
+
+left join ntl_prd_allvm.hr_employee_hist_v as hr
+on a.acss_user_id = hr.nt_user_id
+and a.acss_call_dt  between  hr.eff_dt and hr.exp_dt 
+
+LEFT OUTER JOIN ntl_prd_allvm.hr_employee_hist_v AS hr2                 
+ON hr.SUPER_ID_LVL2_EMP_ID = hr2.emp_id  
+and a.acss_call_dt  between  hr2.eff_dt and hr2.exp_dt   
+                                
+LEFT OUTER JOIN ntl_prd_allvm.hr_employee_hist_v AS hr1                 
+ON hr.SUPER_ID_LVL1_EMP_ID = hr1.emp_id
+and a.acss_call_dt  between  hr1.eff_dt and hr1.exp_dt 
+
+where a.depttype = 'CS'
+and a.center IN('NE Columbia SC',    		
+'NE Huntsville AL',   		
+'NE Hanover MD',   		
+'NE Rochester NY', 		
+'NE Charleston SC', 		
+'NE Charlotte NC',    		
+'NE Wallingford CT',                		
+'NE Wilmington NC',                		
+'NE Bangor ME',      		
+'NE Columbia SC 2')	
+
+group by 1,2,3,4,5,6,7,8,9,10,11) as a
+
+left outer join MyVzw as b		
+		
+ON a.cust_id = b.cust_id		
+AND a.acct_num = b.acct_num		
+AND a.acss_call_dt = b.login_dt		
+AND a.acss_dt_tm <= b.Login_dt_tm	
+
+
+group by 1,2,3,4,5,6,7,8
+
+
+
+
+
+
+
+
+
+	
+
+
