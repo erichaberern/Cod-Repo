@@ -1,0 +1,1901 @@
+/***************************************************************************************************************************************/
+----New NDCIR Script. Last mod was performed by EMH 11/24/15
+----Broke out more of the tables to improve performance and decrease potential spool issues
+/***************************************************************************************************************************************/
+----(Deletion of Day Time Stamp)
+
+----del date ranges to set for new report run 
+
+del from ntl_prd_qmtbls.ndcir_dts;
+
+/***************************************************************************************************************************************/
+----(Data to Creat Date Range) 
+
+----insert new date ranges to be used throughout extract 
+
+ins into ntl_prd_qmtbls.ndcir_dts
+select
+date as run_date
+,case
+when extract(day from calendar_date) < 6 then add_months(calendar_date - (extract(day from calendar_date)-1),-3)  -- if the run date is before the 6th of the current month, still pull 2 months data
+else add_months(calendar_date - (extract(day from calendar_date)-1),-2)
+end as activity_start  -- sets starting month to get full 62 day window
+,calendar_date - 4 as activity_end -- 2 days back for max call date + 2 days more for 0-2 day CIR
+,calendar_date -2 as max_call_dt
+from sys_calendar.calendar
+where calendar_date = date;
+
+/***************************************************************************************************************************************/
+
+------------------------------------------------------This section is the code for setting date ranges manually:  for historical pulls only ------------------------------
+/*
+ins into ntl_prd_qmtbls.ndcir_dts
+select
+calendar_date as run_date
+,run_date as activity_start  -- date based on calendar date set
+,add_months(activity_start - (extract(day from activity_start)-1),2)-1 as activity_end  -- 2 month pull (can change to 1 month by changing 2 to 1 in add_months formula)    
+,activity_end + 62  as max_call_dt -- sets last day of calls to pull
+from sys_calendar.calendar
+where calendar_date = 1150501; -- choose start of date range by putting start date here
+*/
+--------------------------------------------------------Historical date range code ends here ------------------------------------------------------------------------------------
+/***************************************************************************************************************************************/
+----(NDCIR  Temp NC Base Data) 
+
+----Volatile table creates the ESF for New Customer/New Line
+----Modified on 07/20/15 by EMH
+
+create volatile table esf_nc
+as
+(select
+rpt_mth
+,'NC' as activity_type
+,a.sor_id
+,cust_id
+,cust_line_seq_id
+,acct_num
+,acq_ret_Ind
+,act_sls_dist_chnl_type_cd
+,alt_upgrade_reas_cd as buddy_upgrade_ind
+,a.area_cd as npa_area_cd
+,cal_managed_ind
+,cal_prepaid_ind
+,client_id as sys_causing_chng
+,cntrct_acct_num as buddy_up_orig_acct
+,cntrct_cust_id as buddy_up_cust_id
+,cntrct_cust_line_seq_id as buddy_up_seq_id
+,cntrct_mtn as buddy_up_mtn
+,credit_app_num
+,cust_type_cd
+,coalesce(device_prod_nm, prod_nm) as prod_nm 
+,coalesce(device_prod_nm_prev, prod_nm_prev) as prod_nm_prev
+,device_type_cd
+,device_type_cd_prev
+,coalesce(eqp_device_id, esn_num) as esn_num
+,coalesce(eqp_device_id_prev, esn_num_prev) as esn_num_prev
+,duplicate_ind as dir_ind_dupe
+,ecpd_profile_id
+,fin_upg_flag 
+,case when (sls_dist_chnl_type_cd in ('IN','N') and fulfillment_ind<>'F') then 'F' 
+else coalesce(fulfillment_ind,'L') end as fulfillment_id
+,invc_dt
+,invc_line_num
+,invc_num
+,item_cd
+,item_type
+,case
+when line_type_cd='T' then 'M2M'
+when line_type_cd in ('W','H','I') then 'Wireless'
+else 'DNU'  end as line_type
+,loan_type_cd as edge_loan
+,a.mkt_cd
+,mtn
+,net_sales as sold_qty_sum
+----The fields with orig prefix represent when first transaction occurred
+,orig_invc_dt 
+,orig_invc_num
+,orig_sls_outlet_id
+,orig_sor_Id
+,orig_store_num
+,pos_managed_ind -- from pos trans flags consolidated/unconsolidated mkts
+,pos_prepaid_ind -- identifies sku as prepaid/postpaid
+,pos_src_id -- source of pos transaction
+,pplan_cd
+,pplan_mkt_cd
+,pymnt_dt -- this is the tranaction date from dly_activity_dtl for indirect, and activity_dt from dly_line_activity for direct
+,pymnt_tm
+,pymnt_tender_type_cd as transaction_type
+,case
+when row_type_id='d' then 'direct'
+when row_type_id='iug' then 'indirect upgrade'
+when row_type_id='iga' then 'indirect gross add'
+else 'na' end as row_type
+  ----The following fields relate specifically to the transaction 
+,sls_dist_chnl_type_cd
+,sls_prsn_id
+,user_id as acss_netace_user_id
+,hr_emp_id
+,case
+when sls_type='p' then 'new line'
+when sls_type='u' then 'upgrade'
+when sls_type='s' then 'cpe new line'
+when sls_type='w' then 'warranty_fru'
+else 'na' end as sales_type
+,store_num
+,tradein_ind
+,trans_sls_outlet_id
+,vsn_cust_type_cd -- cust type from vision
+
+from ntl_prd_allvm.equip_sum_fact_v as a
+
+join ntl_prd_qmtbls.ndcir_dts as b
+on  a.pymnt_dt between b.activity_start and b.activity_end
+
+where 
+row_type_id in ('d','iga') -- direct, indirect gross adds
+and Acq_ret_ind = 'a' -- for new lines
+and (unit_only_ind ='N' or unit_only_ind is null)
+and pos_managed_ind IN ('c','d') --consolidated markets
+and (pos_prepaid_ind = 'n' OR pos_prepaid_ind IS NULL) --postpaid from equip table
+and rev_gen_ind <> 'N' --revenue generating
+and Fin_tot_flag = 'y' -- add to match finance
+
+qualify row_number() over (partition by cust_id, cust_line_seq_id order by cust_id, cust_line_seq_id, pymnt_dt) = 1
+) with data
+unique primary index(cust_id, cust_line_seq_id)
+index(pymnt_dt) order by values(pymnt_dt)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----This deletes out any devices that were not used
+
+del from esf_nc where line_type='DNU';
+del from esf_nc where sales_type='warranty_fru';  -- del fru's if captured...not included in NDCIR metric/ Mod by MRS
+/***************************************************************************************************************************************/
+----(NDCIR  Temp UP Base Data) 
+
+----Volatile table creates the ESF for Upgrades
+----Modified on 07/20/15 by EMH
+
+create volatile table esf_up
+as
+(select
+rpt_mth
+,'UP' as activity_type
+,a.sor_id
+,cust_id
+,cust_line_seq_id
+,acct_num
+,acq_ret_Ind
+,act_sls_dist_chnl_type_cd
+,alt_upgrade_reas_cd as buddy_upgrade_ind
+,a.area_cd as npa_area_cd
+,cal_managed_ind
+,cal_prepaid_ind
+,client_id as sys_causing_chng
+,cntrct_acct_num as buddy_up_orig_acct
+,cntrct_cust_id as buddy_up_cust_id
+,cntrct_cust_line_seq_id as buddy_up_seq_id
+,cntrct_mtn as buddy_up_mtn
+,credit_app_num
+,cust_type_cd
+,coalesce(device_prod_nm, prod_nm) as prod_nm
+,coalesce(device_prod_nm_prev, prod_nm_prev) as prod_nm_prev
+,device_type_cd
+,device_type_cd_prev
+,coalesce(eqp_device_id, esn_num) as esn_num
+,coalesce(eqp_device_id_prev, esn_num_prev) as esn_num_prev
+,duplicate_ind as dir_ind_dupe
+,ecpd_profile_id
+,fin_upg_flag 
+,case when (sls_dist_chnl_type_cd in ('IN','N') and fulfillment_ind<>'F') then 'F' 
+else coalesce(fulfillment_ind,'L') end as fulfillment_id
+,invc_dt
+,invc_line_num
+,invc_num
+,item_cd
+,item_type
+,case
+when line_type_cd='T' then 'M2M'
+when line_type_cd in ('W','H','I') then 'Wireless'
+else 'DNU' end as line_type
+,loan_type_cd as edge_loan
+,a.mkt_cd
+,mtn
+,net_sales as sold_qty_sum
+----The fields with orig prefix represent when first transaction occurred 
+,orig_invc_dt 
+,orig_invc_num
+,orig_sls_outlet_id
+,orig_sor_Id
+,orig_store_num
+,pos_managed_ind -- from pos trans flags consolidated/unconsolidated mkts
+,pos_prepaid_ind -- identifies sku as prepaid/postpaid
+,pos_src_id -- source of pos transaction
+,pplan_cd
+,pplan_mkt_cd
+,pymnt_dt -- this is the tranaction date from dly_activity_dtl for indirect, and activity_dt from dly_line_activity for direct
+,pymnt_tm
+,pymnt_tender_type_cd as transaction_type
+,case
+when row_type_id='d' then 'direct'
+when row_type_id='iug' then 'indirect upgrade'
+when row_type_id='iga' then 'indirect gross add'
+else 'na' end as row_type
+----The following fields relate specifically to the transaction
+,sls_dist_chnl_type_cd
+,sls_prsn_id
+,user_id as acss_netace_user_id
+,hr_emp_id
+,case
+when sls_type='p' then 'new line'
+when sls_type='u' then 'upgrade'
+when sls_type='s' then 'cpe new line'
+when sls_type='w' then 'warranty_fru'
+else 'na' end as sales_type
+,store_num
+,tradein_ind
+,trans_sls_outlet_id
+,vsn_cust_type_cd -- cust type from vision
+
+from ntl_prd_allvm.equip_sum_fact_v as a
+
+join ntl_prd_qmtbls.ndcir_dts as b
+on  a.pymnt_dt between b.activity_start and b.activity_end
+
+where 
+acq_ret_ind = 'R' --retained custs
+and trans_type_desc <> 'Return'
+and (unit_only_ind ='N' or unit_only_ind is null)
+and pos_managed_ind IN ('c','d') --consolidated markets
+and (pos_prepaid_ind = 'n' OR pos_prepaid_ind IS NULL) --postpaid from equip table
+and rev_gen_ind <> 'N' --revenue generating
+and (ia_item_class_cd in ('data - new','phone - new','phone - ocpo','data - ocpo') or ia_item_class_cd is null) 
+and Fin_tot_flag = 'y' -- add to match finance
+    
+qualify row_number() over (partition by cust_id, cust_line_seq_id order by cust_id, a.cust_line_seq_id, pymnt_dt) = 1
+) with data
+unique primary index(cust_id, cust_line_seq_id)
+index(pymnt_dt) order by values(pymnt_dt)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----This deletes out any devices that were not used
+
+del from esf_up where line_type='DNU';
+del from esf_up where sales_type='warranty_fru';  -- del fru's if captured...not included in NDCIR metric/ Mod by MRS
+/***************************************************************************************************************************************/
+----Find instances where lines appear in both new lines data and upgrades data to remove from upgrades data set
+
+del
+from esf_up a
+where exists(
+sel
+1
+from esf_nc b
+where a.cust_id=b.cust_id
+and a.cust_line_seq_id=b.cust_line_seq_id
+and extract(month from a.pymnt_dt) = extract( month from b.pymnt_dt));
+/***************************************************************************************************************************************/
+----(NDCIR  NC/UP Temp Baseline Data)
+
+----Creating Volatile Table for New Device Call In rate prior to adding large data sets
+
+create volatile table ndcir_base
+as
+(select  * from esf_nc
+union all
+select * from esf_up
+) with data
+unique primary index(cust_id, cust_line_seq_id, pymnt_dt)
+index(pymnt_dt) order by values(pymnt_dt)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----(NC/UP Table CleanUp)
+
+----Dropping of Volatile tables esf_nc and esf_up now will free up space
+drop table esf_nc;
+drop table esf_up;
+/***************************************************************************************************************************************/
+----(Deletion of Product Group Data)
+
+del from ntl_prd_qmtbls.prod_group_v;
+/***************************************************************************************************************************************/
+----(Device Grouping Data)
+
+----Table houses all device-related info
+
+ins into ntl_prd_qmtbls.prod_group_v
+select 
+ddm.prod_nm
+,case 
+when ddm.mfg_nm='ODI Device' then trim(ddm.prod_nm)
+else coalesce((trim(ddm.mfg_nm) || ' ' || 
+case when ddm.device_brand_nm='other' then trim(ddm.model_alias) else trim(ddm.device_brand_nm) end),'no data') 
+end as device
+,coalesce(hef.prod_tier,'no_data') as prod_tier
+,case
+when (coalesce(hef.os_type, he.os_type)='N/A' or coalesce(hef.os_type,he.os_type)='N') then 'no_data'
+when coalesce(hef.os_type, he.os_type)='BB' then 'BlackBerry OS'
+when coalesce(hef.os_type, he.os_type) like 'google%' then 'Android'
+when coalesce(hef.os_type, he.os_type) like 'Microsoft%' then 'Microsoft OS'
+when (coalesce(hef.os_type, he.os_type) like 'Win%' or coalesce(hef.os_type, he.os_type) in ('WP','XP')) then 'Microsoft OS'
+when ddm.mfg_nm='Apple' then 'iOS'
+when ddm.mfg_nm in ('Acer','Archos','Asus','Dell','HP','HTC','Huawei','Kyocera,','LG','Motorola','Samsung','Sharp','Sony Ericcson','Toshiba','ZTE') and ddm.data_tier_fin like '%smart%' 
+and (coalesce(hef.os_type, he.os_type) is null or ddm.os <> '') then 'Android'
+else coalesce(hef.os_type, he.os_type, 'no_data')
+end as os_type
+,coalesce(hef.os_version, he.os_version, 'no_data') as os_version
+,coalesce(hef.eqp_mode, he.eqp_mode, 'no_data') as eqp_mode
+,coalesce(ddm.device_generation,'no_data') as device_generation
+,case
+when ddm.mfg_nm='ODI Device' then 'ODI'
+when ddm.prod_nm like '%Home%' then 'Home Solutions'
+when ddm.data_tier_fin like '%smart%' then 'Smartphone'
+when ddm.tier = 'converged' then 'Netbooks and Tablets'
+when ddm.tier='PC Card' then 'Internet'
+when ddm.data_tier_fin='Connected Devices' then 'Connected Device'
+when ddm.tier is null and ddm.data_tier_fin is null then 'Unknown'
+else 'Basic'
+end as handset_tier
+,coalesce(ddm.mfg_nm,'no_data') as mfg_nm
+,max(coalesce(hef.prod_eff_dt,cast('1999-07-22' as date))) as prod_eff_dt
+    
+from ntl_prd_allvm.device_dp_map_v as ddm
+
+left outer join ntl_prd_allvm.handset_equip_firmware_v as hef
+on ddm.prod_nm=hef.prod_nm
+    
+left outer join ntl_prd_allvm.handset_equip_v as he
+on ddm.prod_nm=he.prod_nm
+
+where ddm.prod_nm not like '%unknown%' 
+and ddm.prod_nm not like '%test%'
+and ddm.prod_nm not like '%demo%'
+
+group by 1,2,3,4,5,6,7,8,9
+qualify row_number() over (partition by ddm.prod_nm order by ddm.prod_nm, max(coalesce(hef.prod_eff_dt,cast('1999-07-22' as date))) desc) = 1;
+
+collect stats on ntl_prd_qmtbls.prod_group_v index(prod_nm);
+collect stats on ntl_prd_qmtbls.prod_group_v column(prod_nm);
+/***************************************************************************************************************************************/
+----(EDGE Transaction Data) 
+
+create volatile table Edge_Trans_data
+as
+(select
+a.cust_id
+,a.cust_line_seq_id
+,a.pymnt_tender_type_cd
+
+from ntl_prd_allvm.pos_install_loan_v as a
+
+join ntl_prd_qmtbls.ndcir_dts as b
+on a.pymnt_trans_dt between b.activity_start - 30 and b.activity_end
+
+where a.pymnt_tender_type_cd='IE'
+and a.cust_id is not null
+
+qualify row_number() over (partition by a.cust_id, a.cust_line_seq_id order by a.cust_id, a.cust_line_seq_id)=1
+
+) with data
+unique primary index(cust_id, cust_line_seq_id)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----(Creates Outlet Data) 
+
+create volatile table outlets 
+as
+(select
+nb.pymnt_dt
+,o.sor_id
+,o.sls_outlet_id
+,o.sls_outlet_mkt_cd
+,o.sls_dist_chnl_type_cd
+,sls.sls_dist_chnl_churn_ctgry
+,o.sls_outlet_nm
+,o.sls_chnl_cd
+,o.master_agent_id
+,maxr.master_agent_desc
+,o.district_cd
+,o.master_loc_cd
+,o.premium_agent_ind
+,o.agent_status_ind
+,case 
+when o.agent_type='L' then 'Outlet'
+when o.agent_type='D' then 'Dedicated Sub Agent'
+when o.agent_type='S' then 'Sub Agent'
+else 'NA'end as agent_type
+,ei.excl_indirect_desc
+,o.edge_enabled_dt
+,ml.addr_line1 as sls_addr_line1
+,ml.city_nm as sls_city_nm
+,ml.state_cd as sls_state_cd
+,ml.zip5_cd as sls_zip5_cd
+,m.area_desc as sls_area_desc
+,m.region_desc as sls_region_desc
+,m.vz_mkt_desc   ---This is the new Market desc/Mod EMH 11/11/15
+,m.vz_mkt_cd   ---This is the new Market code/Mod EMH 11/11/15
+,o.master_agent_area_cd
+,z.tm_zone as sls_tm_zone
+               
+from (select pymnt_dt, trans_sls_outlet_id, sor_id from ndcir_base group by 1,2,3) as nb  ----  Change was made to remove distinct and add in group by to improve performance/ Mod by EMH
+
+join ntl_prd_allvm.outlet_hist_v as o
+on o.sls_outlet_id=nb.trans_sls_outlet_id
+and o.sor_id=nb.sor_id
+and nb.pymnt_dt between o.eff_dt and coalesce(o.exp_dt, date)
+
+left join ntl_prd_allvm.market_hist_v as m
+on o.sls_outlet_mkt_cd=m.mkt_cd
+and o.sor_id=m.sor_id
+and o.eff_dt between m.eff_dt and coalesce(m.exp_dt, date) 
+                                                                
+left  join ntl_prd_allvm.master_location_v as ml
+on ml.master_loc_cd=o.master_loc_cd
+                                                
+----Used for setting times to EST 
+left join ntl_prd_allvm.zip_v as z
+on z.zip5_cd=ml.zip5_cd
+                
+left join ntl_prd_allvm.sales_dist_channel_type_v as sls
+on o.sor_id = sls.sor_id
+and o.sls_dist_chnl_type_cd = sls.sls_dist_chnl_type_cd              
+
+left join ntl_prd_allvm.master_agents_xref_v as maxr        
+on o.master_agent_id=maxr.master_agent_id
+and o.master_agent_area_cd=maxr.master_agent_area_cd
+                
+left join ntl_prd_allvm.exclusive_indirect_v as ei
+on o.excl_indirect_ind=ei.excl_indirect_ind
+
+qualify row_number() over (partition by o.sls_outlet_id, nb.pymnt_dt order by o.sls_outlet_id, nb.pymnt_dt)=1
+) with data
+unique primary index(sls_outlet_id, pymnt_dt)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----  Sales Person id and user id from daily line activity table
+
+create volatile table dly_line_activity_ndcir 
+as
+(select
+dla.sor_id
+,dla.activity_dt
+,dla.cust_id
+,dla.cust_line_seq_id
+,dla.sls_prsn_id
+,dla.user_id
+,dla.sls_outlet_id
+
+from ndcir_base as esf
+
+join ntl_prd_allvm.dly_line_activity_v as dla
+on  esf.cust_id = dla.cust_id
+and  esf.cust_line_seq_id = dla.cust_line_seq_id
+and esf.pymnt_dt = dla.activity_dt
+and esf.trans_sls_outlet_id  = dla.sls_outlet_id
+
+join ntl_prd_qmtbls.ndcir_dts as dts
+on dla.activity_dt between dts.activity_start and dts.activity_end
+
+where dla.sor_id='V' 
+and dla.activity_cd='AC'
+and coalesce(dla.churn_ind,'Y') = 'Y'
+
+group by 1,2,3,4,5,6,7
+qualify row_number() over (partition by dla.activity_dt, dla.cust_id, dla.cust_line_seq_id order by dla.activity_dt, dla.cust_id, dla.cust_line_seq_id) = 1
+
+) with data
+unique primary index(cust_id, cust_line_seq_id, activity_dt, user_id, sls_prsn_id)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----Sales and Employee id from pos trans table
+
+create volatile table pos_trans_ndcir 
+as
+(select
+pos.sor_id
+,pos.pymnt_dt
+,pos.cust_id
+,pos.cust_line_seq_id
+,pos.sls_outlet_id
+,pos.sls_prsn_id
+,coalesce(pos.acss_user_id, pos.netace_user_id) as acss_netace_user_id
+,sp.emp_id
+,pos.credit_app_num
+,pos.invc_num
+,pos.invc_line_num
+,pos.store_num
+
+from ndcir_base as esf
+
+join ntl_prd_allvm.pos_trans_v as pos
+on esf.invc_num = pos.invc_num
+and esf.invc_line_num = pos.invc_line_num
+and esf.store_num = pos.store_num
+and esf.pymnt_dt = pos.pymnt_dt
+
+left join ntl_prd_allvm.sales_person_v as sp
+on pos.sls_prsn_id=sp.sls_prsn_id
+
+join ntl_prd_qmtbls.ndcir_dts as dts
+on pos.pymnt_dt between dts.activity_start and dts.activity_end
+
+Where pos.esn_num is not null
+and pos.sold_qty > 0
+and pos.sls_type='P'
+and pos.sor_id='V' 
+
+group by 1,2,3,4,5,6,7,8,9,10,11,12
+qualify row_number() over (partition by pos.pymnt_dt, pos.cust_id, pos.cust_line_seq_id order by pos.pymnt_dt, pos.cust_id, pos.cust_line_seq_id) = 1
+
+) with data
+unique primary index(cust_id, cust_line_seq_id, pymnt_dt, emp_id, acss_netace_user_id, sls_prsn_id, invc_num,invc_line_num)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----Sales person and User id from eroes activity table
+
+create volatile table eroes_activity_ndcir 
+as
+(select 
+ea.sor_id
+,ea.cust_id
+,ea.cust_line_seq_id
+,ea.trans_dt
+,ea.sls_outlet_id
+,ea.sls_prsn_id
+,ea.eroes_user_id
+    
+from ndcir_base as esf
+
+join ntl_prd_allvm.dly_eroes_activity_v as ea
+on  esf.cust_id = ea.cust_id
+and  esf.cust_line_seq_id = ea.cust_line_seq_id
+and esf.pymnt_dt = ea.trans_dt
+and esf.trans_sls_outlet_id  = ea.sls_outlet_id
+    
+join ntl_prd_qmtbls.ndcir_dts as dts
+on ea.trans_dt between dts.activity_start and dts.activity_end
+
+where ea.trans_type_cd in ('UP','AU')
+and ea.sor_id='V' 
+
+group by 1,2,3,4,5,6,7
+qualify row_number() over (partition by ea.trans_dt, ea.cust_id, ea.cust_line_seq_id order by ea.trans_dt, ea.cust_id, ea.cust_line_seq_id) =1
+
+) with data
+unique primary index(cust_id, cust_line_seq_id, trans_dt, sls_prsn_id,sls_outlet_id,eroes_user_id)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----Remove previous updated data
+
+delete from  ntl_prd_qmtbls.ndcir_dept_Id_v;
+/***************************************************************************************************************************************/
+----This creates a table to decrease the calculation of department id's in the main table
+
+ins into  ntl_prd_qmtbls.ndcir_dept_Id_v
+select
+ech.dept_id 
+,CASE WHEN ech.dept_id IN ( '9180', '<<WEBILING>>','<<OSVSPN>>') THEN 'Bilingual'
+WHEN ech.dept_id IN ( '9150', '9440', '9370', '9260', '9330', '9460','9155','9215','9157','9175') THEN 'BSC'
+WHEN ech.dept_id IN ( '9395', '9010', '9341', '9340', '9450', '9131', '9025', '10014901', '<<SO_WEVIS>>', '<<WE_MWVIS>>', '<<WEVIS>>', '<<NEVIS>>', '<<OSCCALTEL>>', '<<SOVIS>>', '<<NE_MWVIS>>', '<<MWVIS>>', '<<OSVCS>>') THEN 'Care'
+WHEN ech.dept_id IN ('<<AOL_WEVIS>>', '<<OSVAOL>>')  THEN 'AOL'
+WHEN ech.dept_id = '9390' THEN 'EPP'
+WHEN ech.dept_id = '9120' THEN 'ERT'
+WHEN ech.dept_id = '9190' THEN 'IRT'
+WHEN ech.dept_id = '9085' THEN 'Bilingual Tech'
+WHEN ech.dept_id in ( '9002','9003') THEN 'HBA'  ---- New Add as of 08/06/2015 for HBA employee's
+WHEN ech.dept_id IN ('9490', '<<LNP>>','<<OSVLNP>>') THEN 'LNP'
+WHEN ech.dept_id = '9070' THEN 'Retention'
+WHEN ech.dept_id IN ('9030', '9080', '9355', '9040', '<<OSCCALTECH>>', '<<WDTSMO>>', '9195','<<OSVTS>>','<<OSVTS_TCS>>' ) THEN 'Tech'
+WHEN ech.dept_id = '9115' THEN 'GLOBAL'
+WHEN ech.dept_id IN ('<<ONEBILL>>', '<<OSVOB>>') THEN 'OneBill'
+WHEN ech.dept_id = '<<PPCARE>>' THEN 'Prepaid Care'
+WHEN ech.dept_id = '<<PPTECH>>' THEN 'Prepaid Tech'
+ELSE 'Other'
+END AS deptgroup
+
+from ntl_prd_allvm.employee_contractor_hist_v as ech
+
+join ntl_prd_qmtbls.ndcir_dts as nd
+on nd.activity_start between ech.eff_dt and coalesce(ech.exp_dt, date)
+
+where ech.dept_id is not null
+
+group by 1,2
+qualify row_number() over (partition by dept_id  order by dept_id ) = 1    ;
+
+collect stats on ntl_prd_qmtbls.ndcir_dept_Id_v index(dept_id);
+collect stats on ntl_prd_qmtbls.ndcir_dept_Id_v column(dept_id);
+/***************************************************************************************************************************************/
+----Created to fix recent spool space issue with sales person hist table mod by EMH on 12/29/15
+
+create volatile table sales_person_vt
+as
+(select sp.sls_prsn_id ,sp.emp_id, sp.eff_dt, sp.exp_dt
+
+from ntl_prd_allvm.sales_person_hist_v as sp,
+ndcir_base as ndcirb
+
+where  ndcirb.sls_prsn_id=sp.sls_prsn_id    
+and ndcirb.pymnt_dt between sp.eff_dt and sp.exp_dt
+
+) with data primary index (sls_prsn_id, emp_id, eff_dt, exp_dt)
+on commit preserve rows;
+
+collect stats on sales_person_vt column(sls_prsn_id);
+collect stats on sales_person_vt column(emp_id);
+collect stats on sales_person_vt column(eff_dt);
+collect stats on sales_person_vt column(exp_dt);
+/***************************************************************************************************************************************/
+----(ndcir Employee base data step 1) 
+
+create volatile table ndcir_emp
+as
+(
+select 
+ndcirb.rpt_mth
+,ndcirb.cust_id
+,ndcirb.cust_line_seq_id
+,ndcirb.pymnt_dt
+,ndcirb.pymnt_tm
+,sls.sls_dist_chnl_churn_ctgry
+,coalesce(ndcirb.sls_prsn_id, sp.sls_prsn_id, dla.sls_prsn_id, pos.sls_prsn_id, ea.sls_prsn_id) as sls_prsn_id
+,coalesce(ndcirb.hr_emp_id, sp.emp_id,pos.emp_id)as hr_emp_id
+,coalesce(ndcirb.acss_netace_user_id, dla.user_id, pos.acss_netace_user_id, ea.eroes_user_id) as nt_user_id
+
+from  ndcir_base as ndcirb
+
+/**********************************************************/
+left join sales_person_vt as sp
+on ndcirb.sls_prsn_id=sp.sls_prsn_id        ---First update; Changed Sales table to a history table/ mod by EMH 11/05
+and ndcirb.pymnt_dt between sp.eff_dt and sp.exp_dt
+/**********************************************************/
+
+left join ntl_prd_allvm.sales_dist_channel_type_v as sls
+on ndcirb.sor_id = sls.sor_id
+and ndcirb.sls_dist_chnl_type_cd = sls.sls_dist_chnl_type_cd  
+
+left join dly_line_activity_ndcir as dla
+on  ndcirb.cust_id = dla.cust_id
+and  ndcirb.cust_line_seq_id = dla.cust_line_seq_id
+and ndcirb.pymnt_dt = dla.activity_dt
+and ndcirb.trans_sls_outlet_id  = dla.sls_outlet_id
+
+left join pos_trans_ndcir as pos
+on ndcirb.invc_num = pos.invc_num
+and ndcirb.invc_line_num = pos.invc_line_num
+and ndcirb.store_num = pos.store_num
+and ndcirb.pymnt_dt = pos.pymnt_dt
+
+left join eroes_activity_ndcir as ea
+on  ndcirb.cust_id = ea.cust_id
+and  ndcirb.cust_line_seq_id = ea.cust_line_seq_id
+and ndcirb.pymnt_dt = ea.trans_dt
+and ndcirb.trans_sls_outlet_id  = ea.sls_outlet_id
+
+join ntl_prd_qmtbls.ndcir_dts as dts
+on ndcirb.pymnt_dt between dts.activity_start and dts.activity_end
+
+group by 1,2,3,4,5,6,7,8,9
+) with data primary index (cust_id,cust_line_seq_id,pymnt_dt,hr_emp_id,nt_user_id)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+-----(Deletion of Employee base Data)
+
+del from ntl_prd_qmtbls.ndcir_base_emp;
+/***************************************************************************************************************************************/
+----(ndcir Employee base data step 2) 
+
+ins into ntl_prd_qmtbls.ndcir_base_emp
+select 
+ndcirb.rpt_mth
+,ndcirb.cust_id
+,ndcirb.cust_line_seq_id
+,ndcirb.pymnt_dt
+,ndcirb.pymnt_tm
+/*******************************************************************************************/
+---Since User id has a hire return in the data set. We removed the employee hist table that looks at employee id mod by EMH 12/29/15
+,ech.dept_id
+,coalesce(dept.deptgroup, 'Other') as deptgroup
+,ech.bus_unit_id
+,ech.bus_unit_desc
+,ech.dept_fctn_desc
+,ech.dept_desc
+,ndcirb.sls_dist_chnl_churn_ctgry
+,ech.user_comm_class
+,ndcirb.sls_prsn_id
+,coalesce(ech.emp_id, ndcirb.hr_emp_id)as hr_emp_id   ---Moved ech2 to the front since we have a higher return of  employee id's in the ech2 table
+,coalesce(ndcirb.nt_user_id, ech.nt_user_id) as nt_user_id   ---Moved ech2 to be in front of ech since we have a higher return of user id's vs. the ech table
+/*******************************************************************************************/
+from ndcir_emp as ndcirb
+
+left join ntl_prd_allvm.employee_contractor_hist_v as ech  ----Created Tables to improve on performance
+on ndcirb.nt_user_id = ech.nt_user_id
+and cast(ndcirb.pymnt_dt as date) between ech.eff_dt and coalesce(ech.exp_dt, date)
+
+----Added to improve performance within this larger data set
+left join ntl_prd_qmtbls.ndcir_dept_Id_v as dept
+on ech.dept_id = dept.dept_id
+
+join ntl_prd_qmtbls.ndcir_dts as dts
+on ndcirb.pymnt_dt between dts.activity_start and dts.activity_end
+
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16;
+
+collect stats on ntl_prd_qmtbls.ndcir_base_emp index(cust_id,cust_line_seq_id,pymnt_dt,hr_emp_id,nt_user_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_emp column(cust_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_emp column(cust_line_seq_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_emp column(pymnt_dt);
+collect stats on ntl_prd_qmtbls.ndcir_base_emp column(hr_emp_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_emp column(nt_user_id);
+/***************************************************************************************************************************************/
+---Removal of volatile tables to decrease the chances of spool space issues
+
+drop table dly_line_activity_ndcir;
+drop table pos_trans_ndcir;
+drop table eroes_activity_ndcir;
+drop table ndcir_emp;
+/***************************************************************************************************************************************/
+----(Remove Previous Run Data)
+
+delete from ntl_prd_qmtbls.ndcir_base_table;
+/***************************************************************************************************************************************/
+---This was created to resolve issue with spool space. Mod by EMH 12/29/15
+create volatile table cust_acct_line_dly_vt
+as
+(select 
+caldh.cust_id,
+caldh.cust_line_seq_id,
+caldh.line_act_dt,
+caldh.mkt_cd,
+caldh.device_prod_nm,
+caldh.instance_ind,
+caldh.eff_dt,
+caldh.exp_dt
+
+from ndcir_base as esf,
+ntl_prd_allvm.cust_acct_line_dly_hist_v as caldh
+
+where  esf.cust_id=caldh.cust_id
+and esf.cust_line_seq_id=caldh.cust_line_seq_id
+and esf.pymnt_dt between caldh.eff_dt and caldh.exp_dt
+
+) with data primary index (cust_id, cust_line_seq_id, line_act_dt, mkt_cd, instance_ind, eff_dt, exp_dt)
+on commit preserve rows;
+
+collect stats on cust_acct_line_dly_vt column(cust_id);
+collect stats on cust_acct_line_dly_vt column(cust_line_seq_id);
+collect stats on cust_acct_line_dly_vt column(line_act_dt);
+collect stats on cust_acct_line_dly_vt column(mkt_cd);
+collect stats on cust_acct_line_dly_vt column(device_prod_nm);
+collect stats on cust_acct_line_dly_vt column(instance_ind);
+collect stats on cust_acct_line_dly_vt column(eff_dt);
+collect stats on cust_acct_line_dly_vt column(exp_dt);
+
+/***************************************************************************************************************************************/
+---This was created to resolve issue with spool space. Mod by EMH 12/29/15
+create volatile table cust_acct_dly_vt
+as
+(select 
+cadh.sor_id,
+cadh.cust_id,
+cadh.acct_num,
+cadh.acct_estb_dt,
+cadh.lang_pref_ind,
+cadh.eff_dt,
+cadh.exp_dt
+
+from ndcir_base as esf,
+ntl_prd_allvm.cust_acct_dly_hist_v as cadh
+
+where  esf.sor_id=cadh.sor_id
+and esf.cust_id=cadh.cust_id
+and esf.acct_num=cadh.acct_num
+and esf.pymnt_dt between cadh.eff_dt and coalesce(cadh.exp_dt, current_date)
+
+
+) with data primary index (cust_id, acct_num, acct_estb_dt, eff_dt, exp_dt)
+on commit preserve rows;
+
+collect stats on cust_acct_dly_vt column(cust_id);
+collect stats on cust_acct_dly_vt column(acct_num);
+collect stats on cust_acct_dly_vt column(acct_estb_dt);
+collect stats on cust_acct_dly_vt column(lang_pref_ind);
+collect stats on cust_acct_dly_vt column(eff_dt);
+collect stats on cust_acct_dly_vt column(exp_dt);
+
+/***************************************************************************************************************************************/
+----(Final NDCIR Trans BaseLine Table)
+
+----Creating Base Table for New Device Call In Rate
+
+ins into ntl_prd_qmtbls.ndcir_base_table
+select 
+esf.rpt_mth
+,esf.activity_type
+,mh.area_desc as cust_area_desc
+,mh.region_desc as cust_region_desc  
+/********************************************************************************************/
+,mh.vz_mkt_desc as cust_vz_mkt_desc  ---This is for the new Market Desc /Mod EMH 11/11/15
+,mh.vz_mkt_cd as cust_vz_mkt_cd   ---This is the new Market code/Mod EMH 11/11/15
+/********************************************************************************************/
+,coalesce(caldh.mkt_cd,mh.mkt_cd,esf.mkt_cd) as mkt_cd  ---- Updated to capture more customer region data
+,esf.sor_id
+,esf.cust_id
+,esf.cust_line_seq_id
+,esf.acct_num
+,coalesce(cadh.acct_estb_dt, caldh.line_act_dt) as acct_estb_date
+,caldh.line_act_dt
+,(coalesce(caldh.line_act_dt,esf.pymnt_dt) - acct_estb_date)  as line_to_estb_days
+,row_number() over (partition by esf.cust_id order by esf.cust_id, esf.cust_line_seq_id) as row_num
+,case when activity_type = 'UP' then 'upgrade'
+when activity_type = 'NC' and line_to_estb_days <= 60 and fulfillment_id='F'
+and row_num = 1 then 'new account'
+else 'add-a-line'
+end as activation_flag   ---Field updated to incorporate new account change/ Mod by EMH 11/05
+,esf.acq_ret_Ind
+,esf.act_sls_dist_chnl_type_cd
+,esf.buddy_upgrade_ind
+,esf.npa_area_cd
+,esf.cal_managed_ind
+,esf.cal_prepaid_ind
+,esf.sys_causing_chng
+,esf.buddy_up_orig_acct
+,esf.buddy_up_cust_id
+,esf.buddy_up_seq_id
+,esf.buddy_up_mtn
+,esf.credit_app_num
+,esf.cust_type_cd
+,cadh.lang_pref_ind   ---This is a new add. Was not included on the original buildout/ Mod EMH 11/01
+,coalesce(caldh.device_prod_nm,esf.prod_nm) as prod_nm
+,prod.prod_tier
+,prod.os_type
+,prod.os_version
+,prod.eqp_mode
+,prod.device_generation
+,prod.handset_tier
+,prod.mfg_nm
+,prod.prod_eff_dt
+,esf.prod_nm_prev
+,prod2.prod_tier as prod_tier_prev
+,prod2.os_type as os_type_prev
+,prod2.os_version as os_version_prev
+,prod2.eqp_mode as eqp_mode_prev
+,prod2.device_generation as device_generation_prev
+,prod2.handset_tier as handset_tier_prev
+,prod2.mfg_nm as mfg_nm_prev
+,prod2.prod_eff_dt as prod_eff_dt_prev
+,esf.esn_num
+,esf.esn_num_prev
+,esf.dir_ind_dupe
+,coalesce(ecpd.ecpd_profile_id, esf.ecpd_profile_id) as ecpd_profile_id
+,ecpd.ecpd_liability_type_cd
+,esf.fin_upg_flag 
+,case
+when esf.fulfillment_id='l' then 'local'
+when esf.fulfillment_id='f' then 'direct'
+else 'NA' end as fulfillment_indicator
+,esf.fulfillment_id
+,esf.invc_dt
+,esf.invc_line_num
+,esf.invc_num
+,esf.item_cd
+,esf.item_type
+,esf.line_type  ---- Removed loan type and added in line type
+,case    ---File was updated on 10/26. Changed from Edge to Device Payment  EMH
+when e.pymnt_tender_type_cd='IE' then 'DP'
+else 'Non DP'
+end as trans_type
+,esf.mtn
+,esf.sold_qty_sum
+----The fields with orig prefix represent when first transaction occurred
+,esf.pos_managed_ind -- from pos trans flags consolidated/unconsolidated mkts
+,esf.pos_prepaid_ind -- identifies sku as prepaid/postpaid
+,esf.pos_src_id -- source of pos transaction
+,esf.pplan_cd
+,esf.pplan_mkt_cd
+,esf.pymnt_dt -- this is the tranaction date from dly_activity_dtl for indirect, and activity_dt from dly_line_activity for direct
+,esf.pymnt_tm
+,esf.row_type
+----This is using the previous methodology from the new reporting to create time zone change
+,Cast ((esf.pymnt_dt (Date ,Format'Yyyy-Mm-Dd') ) As Char(10)) as pymnt_Dt_Char
+,Cast ((esf.pymnt_tm (Time(6),Format'HHMISS') ) As Char(06)) as pymnt_Tm_Char
+,(pymnt_Dt_Char || coalesce(pymnt_Tm_Char,'235959') (Timestamp(0),Format'Yyyy-Mm-DdHHMiSS')) as pymnt_Ts   ---- Updated just incase a field is blank for payment time
+----Recent updated created by MRS and EMH on 08/07/15
+,case when mh.area_desc = o.sls_area_desc then pymnt_Ts
+when mh.area_desc <> o.sls_area_desc and mh.area_desc='West' then pymnt_Ts - interval '3' hour 
+when mh.area_desc <> o.sls_area_desc and o.sls_area_desc ='West' then pymnt_Ts + interval '3' hour
+else pymnt_Ts
+end as ts_ESTAdjusted
+----The following fields relate specifically to the transaction 
+,o.master_agent_area_cd
+,o.sls_area_desc
+,o.sls_region_desc
+/********************************************************************************************/
+,o.vz_mkt_desc as sls_vz_mkt_desc  ---This is for the new Market Desc /Mod EMH 11/11/15
+,o.vz_mkt_cd as sls_vz_mkt_cd ---This is the new Market code/Mod EMH 11/11/15
+/********************************************************************************************/
+,o.sls_tm_zone
+,coalesce(sls.sls_dist_chnl_churn_ctgry,o.sls_dist_chnl_churn_ctgry) as sls_dist_chnl_churn_ctgry  ---- Updated from previous version including esf channel as well
+,esf.sls_dist_chnl_type_cd
+,esf.trans_sls_outlet_id
+,o.sls_outlet_nm
+,o.sls_outlet_mkt_cd
+,o.master_agent_id  
+,o.master_agent_desc
+,o.district_cd
+,o.master_loc_cd
+,o.premium_agent_ind
+,o.agent_status_ind
+,o.agent_type
+,o.excl_indirect_desc
+,o.edge_enabled_dt
+,o.sls_addr_line1 as sls_address_line
+,o.sls_city_nm
+,o.sls_state_cd
+,o.sls_zip5_cd
+,coalesce(nbe.sls_prsn_id, esf.sls_prsn_id) as sls_prsn_id  ---Updated including data from eroes, daily line activity, pos_trans, sls_prsn_v, and equip sum fact v
+,coalesce(nbe.nt_user_id, esf.acss_netace_user_id) as acss_netace_user_id  ---Updated including data from eroes, daily line activity, pos_trans, sls_prsn_v, and equip sum fact v
+,coalesce(nbe.hr_emp_id, esf.hr_emp_id) as hr_emp_id  ---Updated including data from eroes, daily line activity, pos_trans, sls_prsn_v, and equip sum fact v
+,nbe.dept_id
+,nbe.deptgroup
+,nbe.bus_unit_id
+,nbe.bus_unit_desc
+,nbe.dept_desc
+,nbe.dept_fctn_desc --- Replace "User_Comm_Class with Dept function/ Mod by EMH 11/01
+,esf.sales_type
+,esf.store_num
+,esf.tradein_ind
+,esf.vsn_cust_type_cd -- cust type from vision
+,caldh.instance_ind
+
+from ndcir_base as esf
+
+left join cust_acct_line_dly_vt as caldh
+on esf.cust_id=caldh.cust_id
+and esf.cust_line_seq_id=caldh.cust_line_seq_id
+and esf.pymnt_dt between caldh.eff_dt and caldh.exp_dt
+
+left join ntl_prd_allvm.market_hist_v as mh 
+on coalesce(caldh.mkt_cd,esf.mkt_cd) =mh.mkt_cd  --- Updated to cature more cust region data
+and esf.pymnt_dt between mh.eff_dt and coalesce(mh.exp_dt,current_date)
+
+left join outlets as o
+on esf.sor_id = o.sor_id
+and esf.pymnt_dt = o.pymnt_dt
+and esf.trans_sls_outlet_id = o.sls_outlet_id
+
+left join ntl_prd_allvm.sales_dist_channel_type_v as sls
+on esf.sor_id = sls.sor_id
+and esf.sls_dist_chnl_type_cd = sls.sls_dist_chnl_type_cd 
+
+left join ntl_prd_allvm.cust_ecpd_v as ecpd
+on esf.sor_id=ecpd.sor_id
+and esf.cust_id = ecpd.cust_id
+and esf.pymnt_dt between ecpd.ecpd_eff_dt and coalesce(ecpd.ecpd_term_dt, current_date)
+
+left join Edge_Trans_data as e
+on esf.cust_id = e.cust_id
+and esf.cust_line_seq_id = e.cust_line_seq_id
+
+left join cust_acct_dly_vt as cadh
+on esf.sor_id=cadh.sor_id
+and esf.cust_id=cadh.cust_id
+and esf.acct_num=cadh.acct_num
+and esf.pymnt_dt between cadh.eff_dt and coalesce(cadh.exp_dt, current_date)
+
+left join ntl_prd_qmtbls.ndcir_base_emp as nbe
+on esf.rpt_mth = nbe.rpt_mth
+and esf.cust_id = nbe.cust_id
+and esf.cust_line_seq_id = nbe.cust_line_seq_id
+and esf.pymnt_dt = nbe.pymnt_dt
+
+left join ntl_prd_qmtbls.prod_group_v as prod
+on coalesce(caldh.device_prod_nm,esf.prod_nm) = prod.prod_nm
+
+left join ntl_prd_qmtbls.prod_group_v as prod2
+on esf.prod_nm_prev = prod2.prod_nm
+and esf.prod_nm_prev is not null
+    
+-- used to provide date ranges for standard time.  This is used for adjusting Arizona
+left join ntl_prd_qmtbls.mrs_dst as d
+on d.begindate= esf.pymnt_dt
+
+join ntl_prd_qmtbls.ndcir_dts as dts
+on esf.pymnt_dt between dts.activity_start and dts.activity_end
+
+qualify row_number() over (partition by esf.cust_id,esf.cust_line_seq_id,esf.pymnt_dt order by esf.cust_id,esf.cust_line_seq_id,esf.pymnt_dt)=1;
+
+collect stats on ntl_prd_qmtbls.ndcir_base_table index(cust_id,cust_line_seq_id,pymnt_dt);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(rpt_mth);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(cust_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(cust_line_seq_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(pymnt_dt);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(trans_sls_outlet_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(sls_prsn_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(acss_netace_user_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(hr_emp_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(trans_sls_outlet_id);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(cust_vz_mkt_cd);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(cust_vz_mkt_desc);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(sls_vz_mkt_cd);
+collect stats on ntl_prd_qmtbls.ndcir_base_table column(sls_vz_mkt_desc);
+/***************************************************************************************************************************************/
+----Data clean up for Headquarters
+
+del from ntl_prd_qmtbls.ndcir_base_table where cust_area_desc = 'Headquarters'; ---  Added to remove HQ data
+del from ntl_prd_qmtbls.ndcir_base_table where sls_area_desc = 'Headquarters';
+/***************************************************************************************************************************************/
+----Drop Volatile tables to reduce the potential of spool space issues
+
+drop table ndcir_base;
+drop table Edge_Trans_data;
+drop table outlets;
+/***************************************************************************************************************************************/
+----(Used for ACSS Call Centers Time Zone) 
+
+create volatile table acss_cc
+as
+(sel 
+acss_call_ctr_cd
+,acss_call_ctr_desc
+,acss_region_cd
+,acss_call_ctr_type
+,acss_call_ctr_status_cd
+,acss_area_cd
+,acss_addr_line3
+,acss_call_ctr_time_zn
+,case 
+when substr(acss_call_ctr_desc,character_length(acss_call_ctr_desc)-1,2)='AZ' then 'AZ'
+else coalesce(z.state_cd,substr(acss_call_ctr_desc,character_length(acss_call_ctr_desc)-1,2)) 
+end as state_cd
+
+from ntl_prd_allvm.acss_call_center_v as acc
+
+left join ntl_prd_allvm.zip_v as z 
+on z.zip5_cd=case when position('-' in acss_addr_line3) > 0 then substr(acss_addr_line3,character_length(acss_addr_line3)-9,5)
+else substr(acss_addr_line3,character_length(acss_addr_line3)-4,5) end
+                
+where acss_call_ctr_cd<>0
+) with data
+unique primary index(acss_call_ctr_cd)
+index(acss_call_ctr_time_zn)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----(NDCIR Base Call Table) 
+
+create volatile table acss_calls_vt ---- Changed the name by adding in VT for volatile table. This was to clear up any confusion/ Mod by EMH
+as
+(select
+ac.cust_id
+,ac.acct_num
+,ac.cust_line_seq_Id
+,ac.acss_call_dt
+,ac.acss_call_tm
+,ac.acss_call_id
+,ac.acd_call_id
+,ac.ivr_call_id
+,ac.acss_user_id
+,acc.acss_call_ctr_desc  ----Added by EMH on 07/22/15
+,ac.acss_call_ctr_cd
+,acc.acss_call_ctr_type
+,ac.acss_dept_id
+,ac.call_start_tm
+,ac.call_end_tm
+,Cast ((ac.acss_call_dt (Date ,Format'Yyyy-Mm-Dd') ) As Char(10)) acss_Dt_Char
+,Cast ((ac.acss_call_tm  (Time(0),Format'HHMISS') ) As Char(06)) acss_Tm_Char --- Not sure if the time code should be (0) or (6)  ????
+,(acss_Dt_Char || acss_Tm_Char) (Timestamp(0),Format'Yyyy-Mm-DdHHMiSS') acss_Ts
+,case  ---Found that the time zone needed to be changed from Minus to Plus
+when acc.acss_call_ctr_time_zn in ('CDT','CST') 
+then acss_Ts + interval '1' hour
+when acc.acss_call_ctr_time_zn in ('MST','MDT') and acc.state_cd <> 'AZ'
+then acss_Ts + interval '2' hour
+when acc.state_cd = 'AZ' then
+case when ac.acss_call_dt between dst.begindate and dst.enddate -- dates from the table reference when the days of the year are standard time
+then acss_Ts + interval '3' hour
+else acss_Ts + interval '2' hour
+end
+when acc.acss_call_ctr_time_zn in ('PDT','PST')
+then acss_Ts + interval '3' hour
+when acc.acss_call_ctr_time_zn in ('HDT','HST') then
+case when ac.acss_call_dt between dst.begindate and dst.enddate -- dates from the table reference when the days of the year are standard time
+then acss_Ts + interval '6' hour
+else acss_Ts + interval '5' hour
+end
+else acss_Ts
+end as acss_ts_ESTAdjusted -- time adjusted to account for server locations
+,acc.acss_call_ctr_time_zn 
+,acc.state_cd
+,ac.acss_call_type_cd
+    
+from ntl_prd_allvm.acss_call_v as ac
+    
+join ntl_prd_qmtbls.ndcir_dts as nd
+on ac.acss_call_dt between nd.activity_start and nd.max_call_dt
+
+join acss_cc as acc
+on ac.acss_call_ctr_cd = acc.acss_call_ctr_cd
+   
+join ntl_prd_allvm.acss_dept_v as d
+on ac.acss_dept_id = d.acss_dept_id
+
+join udm_prdusr_tbls.ndcir_acss_depts as nad
+on ac.acss_dept_id=nad.acss_dept_id
+and nad.exclusion_type in ('45','345')
+   
+left join ntl_prd_qmtbls.mrs_dst as dst
+on ac.acss_call_dt between dst.begindate and dst.enddate
+
+qualify row_number() over (partition by ac.cust_id, ac.cust_line_seq_Id, ac.acss_user_id, ac.acss_call_id, ac.acss_call_dt order by ac.cust_id, ac.cust_line_seq_Id, ac.acss_user_id,  ac.acss_call_id, ac.acss_call_dt, ac.call_start_tm ) = 1    
+
+) with data
+unique primary index(cust_id, cust_line_seq_Id, acss_user_id,  acss_call_id, acss_call_dt, call_start_tm)
+index(cust_id, cust_line_seq_Id,acss_call_dt)
+index(acss_call_dt) order by values(acss_call_dt)
+index(acss_call_type_cd)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----Drop Volatile tables to reduce the potential of spool space issues
+
+drop table acss_cc;
+/***************************************************************************************************************************************/
+
+----This removes call type 4,5,and 16 since they are considered outbound and it removes where interal Centers have a type 3 for a manual open to ACSS
+
+del from acss_calls_vt where acss_call_type_cd in ('4','5','16');
+del from acss_calls_vt where acss_call_type_cd = '3' and acss_call_ctr_type='v' ;
+/***************************************************************************************************************************************/
+----pulls days where an outsource vendor took a type 1 or 7 call that day.  
+---- if a vendor took a type 1 or 7 call at any point during the day, type 3 calls will be deleted from call data (as seen in the next step)
+
+create volatile table nocir_os_type1 as (
+select acss_call_dt,
+       acss_call_ctr_cd,
+       acss_dept_id
+from acss_calls_vt
+where  acss_call_type_cd in ('1','7')
+and    acss_call_ctr_type = 'o'
+group by 1,2,3
+) with data
+primary index (acss_call_dt, acss_call_ctr_cd, acss_dept_id)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----delete type 3 calls if the outsource center had taken any type 1 or 7 calls that day
+
+del from acss_calls_vt
+where  acss_calls_vt.acss_call_dt = nocir_os_type1.acss_call_dt
+and    acss_calls_vt.acss_call_ctr_cd = nocir_os_type1.acss_call_ctr_cd
+and    acss_calls_vt.acss_dept_id = nocir_os_type1.acss_dept_id
+and    acss_calls_vt.acss_call_type_cd=3;
+/***************************************************************************************************************************************/
+----(Remove previous Run Data)
+
+delete from ntl_prd_qmtbls.acss_calls;
+/***************************************************************************************************************************************/
+----(Final NDCIR Call Baseline table (Completed Cleanup))
+
+ins into ntl_prd_qmtbls.acss_calls
+Select *
+
+from acss_calls_vt;
+
+collect stats on ntl_prd_qmtbls.acss_calls index(cust_id, cust_line_seq_Id, acss_user_id,  acss_call_id, acss_call_dt, call_start_tm);
+collect stats on ntl_prd_qmtbls.acss_calls column(cust_id);
+collect stats on ntl_prd_qmtbls.acss_calls column(cust_line_seq_Id);
+collect stats on ntl_prd_qmtbls.acss_calls column(acss_user_id);
+collect stats on ntl_prd_qmtbls.acss_calls column(acss_call_id);
+collect stats on ntl_prd_qmtbls.acss_calls column(acss_call_dt);
+collect stats on ntl_prd_qmtbls.acss_calls column(call_start_tm);
+collect stats on ntl_prd_qmtbls.acss_calls column(acd_call_id);
+collect stats on ntl_prd_qmtbls.acss_calls column(ivr_call_id);
+collect stats on ntl_prd_qmtbls.acss_calls column(acss_dept_id);
+/***************************************************************************************************************************************/
+----Dropping Call Volitale table to reduce potenial spool space
+
+drop table acss_calls_vt;  ---- Changed the name by adding in VT for volatile table. This was to clear up any confusion/ Mod by EMH
+/***************************************************************************************************************************************/
+
+--------------------End of Base Tables and now Minor tables for final construction of NDCIR Reporting ---------------------------
+
+/***************************************************************************************************************************************/
+----(Trade-In Device Data)
+
+create volatile table Trade_in_emh_v
+as
+(select
+a.rpt_mth,
+min(a.trade_in_complete_dt) as min_trade_in_dt,
+max(a.trade_in_complete_dt) as max_trade_in_dt,
+a.cust_id,
+a.cust_line_seq_id,
+a.trade_in_ind
+
+from (select 
+esf.rpt_mth,
+peti.trade_in_complete_dt,
+esf.fulfillment_ind,
+esf.cust_id,
+esf.cust_line_seq_id,
+esf.tradein_ind as trade_in_ind,
+case when esf.ITEM_CD IN  ('MB294LL/A','MB293LL/A','MB292LL/A','GTP7510MAV', 'TC10001', 'TC10002') then 'NON-MEID'                   
+when esf.row_type_id = 'D' and esf.device_prod_nm is not null and ( h.device_generation  is null or h.device_generation  in ('1X', '3G') ) then 'Unknown'                   
+when esf.row_type_id = 'D' and esf.device_prod_nm is null and ( h.device_generation  is null or h.device_generation  = '4G' ) then 'Basic'                              
+when esf.row_type_id <> 'D' and esf.device_type_cd like '4G%'  and ( h.device_generation  is null or h.device_generation in ('1X', '3G') ) then 'Unknown'                   
+when esf.row_type_id <> 'D' and ( esf.device_type_cd is null or esf.device_type_cd NOT like '4G%' ) and ( h.device_generation is null or h.device_generation  = '4G'  ) then 'Basic'                                
+else h.data_tier                
+end as data_tr,                                                                 
+sum (case when esf.tradein_ind = 'Y' then esf.net_sales
+else 0 end ) as trade_in_cnt 
+
+from ntl_prd_allvm.equip_sum_fact_v as esf
+
+inner join ntl_prd_allvm.pos_equip_trade_in_v  as peti
+on esf.store_num = peti.store_num
+and esf.invc_num = peti.invc_num
+and esf.invc_line_num = peti.invc_line_num 
+and esf.invc_dt = peti.trade_in_dt
+and esf.fin_tot_flag = 'N' 
+
+left join ntl_prd_allvm.item_v  as gcc
+on gcc.item_cd = esf.item_cd
+and gcc.ia_item_class_cd = 'GIFT CERT/CARDS'
+
+left outer join  ntl_prd_qmtbls.clf_handsets_prod as h  
+on H.PROD_NM = CASE      
+WHEN esf.ROW_TYPE_ID = 'D' AND esf.DEVICE_PROD_NM IS NOT NULL THEN esf.DEVICE_PROD_NM --4G DIRECT
+WHEN esf.ROW_TYPE_ID = 'D' AND esf.DEVICE_PROD_NM IS NULL THEN esf.PROD_NM --3G DIRECT (ASSUMED) 
+WHEN esf.ROW_TYPE_ID <> 'D' AND esf.DEVICE_TYPE_CD LIKE '4G%' THEN esf.DEVICE_PROD_NM --4G INDIRECT 
+WHEN esf.ROW_TYPE_ID <> 'D' AND (esf.DEVICE_TYPE_CD IS NULL OR esf.DEVICE_TYPE_CD NOT LIKE '4G%') THEN esf.PROD_NM --3G INDIRECT
+END    
+
+----This is the table created by the NDCIR reporting to make sure we are looking at the same date range
+
+join ntl_prd_qmtbls.ndcir_dts as dts
+on  peti.trade_in_complete_dt between dts.activity_start and dts.activity_end
+
+where
+esf.row_type_id = 'D' --- for POS records only
+and esf.POS_MANAGED_IND IN ('C','D')                        
+and COALESCE(esf.POS_PREPAID_IND,'N') <> 'Y'
+and ((esf.tradein_ind = 'Y' --- trade in records only
+and peti.invc_num is not null --- to exclude canceled trade-in records
+and gcc.item_cd is null  )or(esf.fin_tot_flag = 'y'
+and data_tr in ('basic', 'smartphone')))
+
+group by 1,2,3,4,5,6,7
+
+) as a
+
+group by
+a.rpt_mth,
+a.cust_id,
+a.cust_line_seq_id,
+a.trade_in_ind
+
+) with data
+primary index(cust_id, cust_line_seq_id, max_trade_in_dt, min_trade_in_dt)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----(NonComm-CS Data) 
+----NonComm-CS was updated on 11/01 by EMH/ Recent mod on 11/19by EMH
+
+create volatile table NonCommCsNc
+as
+(
+Select ncc.*
+
+from (select
+a.pymnt_dt
+,a.cust_id
+,a.cust_line_seq_id
+,a.sls_prsn_id
+,a.hr_emp_id
+,a.acss_netace_user_id
+,a.dept_fctn_desc
+
+,case when a.sls_prsn_id='ENC' then 'acss' -- non commision rep flag for care
+when a.sls_prsn_id='EJH43' then 'acss' -- non commision rep associated to CMO
+when a.sls_prsn_id is null then 'no data'
+when a.hr_emp_id is null or a.hr_emp_id = 'no_data' then 'acss' -- solves for house account reps who are still categorized as care reps
+else 'sls_prsn_id' -- commissioned reps flagged as noncomm reps in stores or other channels
+end as sls_id_desc
+/***************************************************************************************************************************************/
+----This was added to capture the missing NonComm-CS vendor reps/mod by EMH 11/19
+
+,case when (user_comm_class like '%outsource%' and coalesce(sls_outlet_nm,'no data') like '%kipany%')
+or (user_comm_class like '%outsource%' and coalesce(user_com_id,'no data') like '%kipany%')
+or (user_comm_class is null and coalesce(sls_outlet_nm,'no data') like '%kipany%' )  
+or (user_comm_class not like '%outsource%' and (coalesce(sls_outlet_nm,'no data') like '%kipany%' or coalesce(user_com_id,'no data') like '%kipany%')) 
+then  'kipany' else  'not kipany' end as kipany_fix
+
+,case when a.sls_dist_chnl_churn_ctgry = 'NonComm' and ech.user_comm_class like '%outsource%'  and sls_id_desc = 'acss' and kipany_fix <> 'kipany'
+then 'Vendor Customer Care' else a.dept_fctn_desc end as dept_fctn_desc_new
+
+/***************************************************************************************************************************************/
+,case when a.sls_dist_chnl_churn_ctgry='NonComm' and dept_fctn_desc_new in ('Customer Care', 'Vendor Customer Care') and sls_id_desc = 'acss' 
+then 'NonComm-CS' else a.sls_dist_chnl_churn_ctgry 
+end as sls_dist_chnl_churn_ctgry
+/***************************************************************************************************************************************/
+/***  Add Coalesce since trans sls outlet id is used as a prime key / Mod EMH  10/30  ***/
+,case when sls_id_desc='sls_prsn_id' then a.sls_outlet_nm else coalesce(acc.acss_call_ctr_desc,a.sls_outlet_nm) end as sls_outlet_nm
+,case when sls_id_desc='sls_prsn_id' then a.sls_area_desc else coalesce(case 
+when acc.acss_area_cd='NM' then 'Northeast' 
+when acc.acss_area_cd='MW' then 'Midwest'
+when acc.acss_area_cd='SO' then 'South'
+when acc.acss_area_cd='WE' then 'West'
+else acc.acss_area_cd end,substr(acc.acss_call_ctr_desc,1,2), a.sls_area_desc) end as sls_area_desc
+
+,coalesce(case when sls_id_desc='sls_prsn_id' then a.sls_region_desc else ar.acss_region_desc end, a.sls_region_desc) as sls_region_desc
+,case when sls_id_desc='sls_prsn_id' then a.trans_sls_outlet_id else coalesce(acc.acss_call_ctr_cd, a.trans_sls_outlet_id) end as trans_sls_outlet_id  --- Changed this to coalesce to just capture any trans_sls_outlet_id that fallout
+,coalesce(case when sls_id_desc='sls_prsn_id' then a.sls_address_line else acc.acss_addr_line2 end, a.sls_address_line) as sls_address_line
+/***************************************************************************************************************************************/
+---Update to code to fix for missing sales city names/ mod EMH 11/11/15
+,cast(trim(otranslate(oreplace(oreplace(oreplace(oreplace(oreplace(acc.acss_call_ctr_desc,'    ',' '),'    ',' '),'  ',''),'-',''),',',''),'0123456789', '')) as varchar(64)) as acss_call_ctr_desc_new
+,case when char_length(acss_call_ctr_desc_new) - char_length(otranslate(acss_call_ctr_desc_new, ' ','')) = 2 and acss_call_ctr_desc_new not like '%virtual%' then strtok(acss_call_ctr_desc_new,' ',2) 
+when char_length(acss_call_ctr_desc_new) - char_length(otranslate(acss_call_ctr_desc_new, ' ','')) = 2 and acss_call_ctr_desc_new like '%virtual%' then strtok(acss_call_ctr_desc_new,' ',2) || ' ' || strtok(acss_call_ctr_desc_new,' ',3) 
+when char_length(acss_call_ctr_desc_new) - char_length(otranslate(acss_call_ctr_desc_new, ' ','')) = 3 then strtok(acss_call_ctr_desc_new,' ',2)  || ' ' || strtok(acss_call_ctr_desc_new,' ',3) 
+when char_length(acss_call_ctr_desc_new) - char_length(otranslate(acss_call_ctr_desc_new, ' ','')) = 4 then strtok(acss_call_ctr_desc_new,' ',2) || ' ' || strtok(acss_call_ctr_desc_new,' ',3) || ' ' || strtok(acss_call_ctr_desc_new,' ',4) 
+when char_length(acss_call_ctr_desc_new) - char_length(otranslate(acss_call_ctr_desc_new, ' ','')) = 5 then strtok(acss_call_ctr_desc_new,' ',2) || ' ' || strtok(acss_call_ctr_desc_new,' ',3) || ' ' || strtok(acss_call_ctr_desc_new,' ',4) || ' ' || strtok(acss_call_ctr_desc_new,' ',5) 
+when char_length(acss_call_ctr_desc_new) - char_length(otranslate(acss_call_ctr_desc_new, ' ','')) = 6 then strtok(acss_call_ctr_desc_new,' ',2) || ' ' || strtok(acss_call_ctr_desc_new,' ',3) || ' ' || strtok(acss_call_ctr_desc_new,' ',4) || ' ' || strtok(acss_call_ctr_desc_new,' ',5) || ' ' || strtok(acss_call_ctr_desc_new,' ',6)  
+else 'unknown'  end as sls_city_nm_fix
+,coalesce(case when sls_id_desc = 'sls_prsn_id' then a.sls_city_nm 
+when sls_id_desc = 'acss'  and length(substr(trim(acc.acss_addr_line3),0,position(',' in trim(acc.acss_addr_line3)))) = '0' 
+then sls_city_nm_fix else substr(trim(acc.acss_addr_line3),0,position(',' in trim(acc.acss_addr_line3))) end,a.sls_city_nm) as sls_city_nm
+/***************************************************************************************************************************************/
+,coalesce(case when sls_id_desc='sls_prsn_id' then a.sls_state_cd else case 
+when acc.acss_call_ctr_desc='HQ AFNI Tucson_NW VZW.COM' then 'VZW.COM'
+when acc.acss_call_ctr_desc='HQ AFNI Tucson_NW WDTS' then 'VZW.COM'
+when acc.acss_call_ctr_desc='NE Columbia SC 2' then 'SC'
+when acc.acss_call_ctr_desc='S AFNI Opelika - VZW.COM' then 'VZW.COM'
+when acc.acss_call_ctr_desc='S Little Rock AR 2' then 'AR'
+else substr(acc.acss_call_ctr_desc,character_length(trim(acc.acss_call_ctr_desc))-1,2) end end, a.sls_state_cd) as sls_state_cd
+
+from ntl_prd_qmtbls.ndcir_base_table as a
+
+left join ntl_prd_allvm.employee_contractor_hist_v as ech  ---Built in to capture Outsource Reps for NonComm-CS
+on a.acss_netace_user_id = ech.nt_user_id
+and cast(a.pymnt_dt as date) between ech.eff_dt and coalesce(ech.exp_dt, date)
+
+left join ntl_prd_allvm.acss_user_dly_hist_v as au
+on a.acss_netace_user_id=au.acss_user_id
+and a.pymnt_dt between au.eff_dt and au.exp_dt
+
+left join ntl_prd_allvm.acss_call_center_hist_v as acc
+on au.acss_call_ctr_cd=acc.acss_call_ctr_cd
+and a.pymnt_dt between acc.eff_dt and acc.exp_dt
+
+left join ntl_prd_allvm.acss_region_hist_v as ar
+on acc.acss_region_cd=ar.acss_region_cd
+and a.pymnt_dt between ar.eff_dt and ar.exp_dt
+
+join ntl_prd_qmtbls.ndcir_dts as dts
+on a.pymnt_dt between dts.activity_start and dts.activity_end
+
+) as ncc
+
+where ncc.sls_dist_chnl_churn_ctgry =  'NonComm-CS'
+
+) with data
+unique primary index(cust_id, cust_line_seq_id, pymnt_dt, hr_emp_id, acss_netace_user_id)   ----  Added in " Unique " to the primary index. The data ran without issue/ mod by EMH
+index(pymnt_dt) order by values(pymnt_dt)
+on commit preserve rows;
+
+/***************************************************************************************************************************************/
+----------------------------------   Start of Waterfall Analysis for NDCIR Enhancements  -------------------------------------------------------
+
+/***************************************************************************************************************************************/
+----(Waterfall Step 1: NonComm-CS)
+
+create volatile table ndcir_noncommcs_wf1
+as
+(select
+esf.rpt_mth
+,coalesce(ncc.sls_dist_chnl_churn_ctgry,esf.sls_dist_chnl_churn_ctgry) as sls_dist_chnl_churn_ctgry
+,count(distinct(esf.cust_id||esf.cust_line_seq_id)) as acct
+
+from ntl_prd_qmtbls.ndcir_base_table as esf
+
+left outer join NonCommCsNc as ncc /**** This table was created to seperated Care NonComm from the rest of the NonComm group ***/
+on esf.pymnt_dt = ncc.pymnt_dt
+and esf.cust_id = ncc.cust_id
+and esf.cust_line_seq_id = ncc.cust_line_seq_id
+and esf.acss_netace_user_id = ncc.acss_netace_user_id
+
+group by 1,2
+) with data
+primary index(rpt_mth, sls_dist_chnl_churn_ctgry) 
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----(Waterfall Step 2: Trade-in)
+
+create volatile table ndcir_tradein_wf2
+as
+(select
+esf.rpt_mth
+,esf.sls_dist_chnl_churn_ctgry
+,count(distinct(esf.cust_id||esf.cust_line_seq_id)) as acct
+,sum(case when coalesce(tie.trade_in_ind, esf.tradein_ind) = 'Y' then 1 else 0 end) as tradeinCount_Yes
+,sum(case when coalesce(tie.trade_in_ind, esf.tradein_ind) is null then 1 else 0 end) as tradeinCount_No
+
+from ntl_prd_qmtbls.ndcir_base_table as esf
+
+left outer join Trade_in_emh_v as tie
+on esf.cust_id = tie.cust_id
+and esf.cust_line_seq_id = tie.cust_line_seq_id
+and esf.rpt_mth = tie.rpt_mth /** This is creating the join in the data to make sure it is in the same calendar month**/
+and tie.min_trade_in_dt <= esf.pymnt_dt /**  This makes sure that the trade in date is not greater than the activity date **/
+
+group by 1,2
+) with data
+primary index(rpt_mth, sls_dist_chnl_churn_ctgry) 
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----( Waterfall Step 3: Finalized Baseline Data for NDCIR)
+
+---- The fields have changed this is still just a test. After this I join calls and trans actions together and create the last water fall. 
+
+create volatile table ndcir_Final_Base_wf3
+as
+(select 
+esf.rpt_mth
+,esf.cust_id
+,esf.cust_line_seq_id
+,esf.pymnt_dt
+,coalesce(ncc.sls_dist_chnl_churn_ctgry,esf.sls_dist_chnl_churn_ctgry) as sls_dist_chnl_churn_ctgry  ---- ADDED
+,sum(case when coalesce(tie.trade_in_ind, esf.tradein_ind) = 'Y' then 1 else 0 end) as tradeinCount_Yes
+,sum(case when coalesce(tie.trade_in_ind, esf.tradein_ind) is null then 1 else 0 end) as tradeinCount_No
+
+from ntl_prd_qmtbls.ndcir_base_table as esf
+
+left join NonCommCsNc as ncc /**** This table was created to seperated Care NonComm from the rest of the NonComm group ***/
+on esf.pymnt_dt = ncc.pymnt_dt
+and esf.cust_id = ncc.cust_id
+and esf.cust_line_seq_id = ncc.cust_line_seq_id
+and esf.acss_netace_user_id = ncc.acss_netace_user_id
+
+left join Trade_in_emh_v as tie
+on esf.cust_id = tie.cust_id
+and esf.cust_line_seq_id = tie.cust_line_seq_id
+and esf.rpt_mth = tie.rpt_mth /** This is creating the join in the data to make sure it is in the same calendar month**/
+and tie.min_trade_in_dt <= esf.pymnt_dt /**  This makes sure that the trade in date is not greater than the activity date **/
+
+group by 1,2,3,4,5
+
+) with data
+primary index(pymnt_dt, cust_id, cust_line_seq_id) 
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----( Waterfall Step 4: NDCIR ACCTS/CALLS Prior to TimeZone fix)
+
+create volatile table ndcir_Base_Calls_TZF_wf4  ----  Re-Written  (Update provided on 07/14/15/ EMH)
+as
+(select
+esf.rpt_mth
+,esf.cust_id
+,esf.cust_line_seq_id
+,esf.pymnt_dt
+,ac.acss_call_dt
+,esf.acss_netace_user_id
+,ac.acss_user_id
+,esf.ts_ESTAdjusted as acss_remarks_tm_trans 
+
+,case when esf.instance_ind in ('VW','IW','VB') then ac.acss_ts_estadjusted - interval '3' hour
+else ac.acss_ts_estadjusted end as acss_remarks_tm_call 
+
+,ac.acss_call_dt - esf.pymnt_dt as call_period 
+,case when acss_remarks_tm_call < acss_remarks_tm_trans then 'N' else 'Y' end as included_call
+,case when call_period < 3 then 1 else 0 end as calls0To2
+,case when call_period < 8  then 1 else 0 end as calls0To7
+,case when call_period < 32 then 1 else 0 end as calls0To31
+,case when call_period < 63 then 1 else 0 end as calls0To62
+    
+from ntl_prd_qmtbls.ndcir_base_table as esf
+
+join ntl_prd_qmtbls.acss_calls as ac
+on esf.cust_id=ac.cust_id
+and esf.cust_line_seq_Id=ac.cust_line_seq_Id
+
+) with data
+PRIMARY INDEX (pymnt_dt, acss_call_dt, cust_id, cust_line_seq_id)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----delete call data where call occurred prior to the transaction    
+----delete call data where the rep that process the order is not the same rep that shows up as the initial call on the same day
+
+delete from ndcir_Base_Calls_TZF_wf4
+where included_call='N';
+
+delete from ndcir_Base_Calls_TZF_wf4
+where acss_netace_user_id = acss_user_id and pymnt_dt = acss_call_dt;   ----This was added to remove where the initial rep and the first call  rep on the same day are not the same/ Mod by EMH 07/14/15
+/***************************************************************************************************************************************/
+----(Final Waterfall Volatile table for Analysis)
+
+create volatile table ndcir_All_In_wf5
+as
+(select 
+wf1.rpt_mth
+,wf1.sls_dist_chnl_churn_ctgry
+,count(distinct(wf1.cust_id||wf1.cust_line_seq_id)) as acct
+,sum(tradeinCount_Yes) as tradeinCount_Yes
+,sum(tradeinCount_No) as tradeinCount_No
+,sum(calls0To2) as calls0To2
+,sum(calls0To7) as calls0To7
+,sum(calls0To31) as calls0To31
+,sum(calls0To62) as calls0To62
+
+from ndcir_Final_Base_wf3 as wf1
+
+left join ndcir_Base_Calls_TZF_wf4 as wf2
+on wf1.cust_id=wf2.cust_id
+and wf1.cust_line_seq_Id=wf2.cust_line_seq_Id
+and wf2.acss_call_dt between wf1.pymnt_dt and wf1.pymnt_dt + 62
+
+group by 1,2
+
+) with data
+PRIMARY INDEX (rpt_mth,sls_dist_chnl_churn_ctgry)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----(Final Waterfall Analysis)
+
+/*select *
+
+from ndcir_All_In_wf5;*/
+
+/***************************************************************************************************************************************/
+----Dropping Volitale tables to reduce potenial spool space
+---- Most recently added to help with clean up of data/ mod by EMH
+
+drop table ndcir_noncommcs_wf1;
+drop table ndcir_tradein_wf2;
+drop table ndcir_Final_Base_wf3;
+drop table ndcir_Base_Calls_TZF_wf4;  
+drop table ndcir_All_In_wf5;
+/***************************************************************************************************************************************/
+----------------------------------   End of Waterfall Analysis for NDCIR Enhancements  -------------------------------------------------------
+
+/***************************************************************************************************************************************/
+
+create volatile table ndcir_calls_tz 
+as
+(select
+esf.rpt_mth
+,esf.cust_id
+,esf.cust_line_seq_Id
+,esf.acct_num
+,esf.pymnt_dt
+,ac.acss_call_dt
+,ac.acss_call_tm
+,ac.acss_call_id
+,ac.acd_call_id
+,ac.ivr_call_id
+,esf.acss_netace_user_id
+,ac.acss_user_id
+,ac.acss_call_ctr_desc  ----Added by EMH on 07/22/15
+,ac.acss_call_ctr_cd
+,ac.acss_call_ctr_type
+,ac.acss_call_type_cd
+,ac.acss_dept_id
+,ac.call_start_tm
+,ac.call_end_tm
+,ac.acss_Ts
+,ac.acss_ts_ESTAdjusted
+,esf.ts_ESTAdjusted
+,esf.instance_ind
+,esf.ts_ESTAdjusted as acss_remarks_tm_trans   ----Update made since new Time Zone no longer requires converting the interval updated by MRS and EMH 08/07/15
+
+,case when esf.instance_ind in ('VW','IW','VB') then ac.acss_ts_estadjusted - interval '3' hour
+else ac.acss_ts_estadjusted end as acss_remarks_tm_call 
+
+,ac.acss_call_dt - esf.pymnt_dt as call_period 
+,case when acss_remarks_tm_call < acss_remarks_tm_trans then 'N' else 'Y' end as included_call   ----This field was changed to accomidate for the new Time Zone change updated by     MRS and EMH 08/07/15
+,case when call_period < 3 then 1 else 0 end as calls0To2
+,case when call_period < 8  then 1 else 0 end as calls0To7
+,case when call_period < 32 then 1 else 0 end as calls0To31
+,case when call_period < 63 then 1 else 0 end as calls0To62
+    
+from ntl_prd_qmtbls.ndcir_base_table as esf
+
+join ntl_prd_qmtbls.acss_calls as ac
+on esf.cust_id=ac.cust_id
+and esf.cust_line_seq_Id=ac.cust_line_seq_Id
+
+) with data
+PRIMARY INDEX (cust_id,cust_line_seq_Id ,acss_call_tm, acss_call_id )
+INDEX ( rpt_mth ,cust_id,cust_line_seq_Id )
+on commit preserve rows;
+/***************************************************************************************************************************************/
+----delete call data where call occurred prior to the transaction    
+----delete call data where the rep that process the order is not the same rep that shows up as the initial call on the same day
+
+delete from ndcir_calls_tz
+where included_call='N';
+
+delete from ndcir_calls_tz
+where acss_netace_user_id = acss_user_id and pymnt_dt = acss_call_dt;   ----This was added to remove where the initial rep and the first call  rep on the same day are not the same/ Mod by EMH 07/14/15
+/***************************************************************************************************************************************/
+----(Added DateTime Table)
+----This table creates an additonal level of date time parameters for the final run
+
+create volatile table dts
+as
+(select
+calendar_date as run_date
+,run_date - interval '2' day as max_call_dt
+,max_call_dt - interval '2' day as max_trans_3day
+,max_trans_3day - (extract(day from max_trans_3day)-1) as min_trans_3day
+,max_call_dt - interval '7' day as max_trans_7day
+,max_trans_7day - (extract(day from max_trans_7day)-1) as min_trans_7day
+,case
+when extract(day from run_date) = 1 then add_months(run_date - (extract(day from run_date)-1),-2)  -- if the run date is the 1st of the month, set to 2 mnths back as last day's ACSS data not in yet
+else add_months(run_date - (extract(day from run_date)-1),-1)
+end as day31_mtd
+,case
+when extract(month from day31_mtd)=extract(month from max_call_dt) then 
+case 
+when extract(month from (max_call_dt - interval '31' day)) = extract(month from add_months(day31_mtd,-1)) then max_call_dt - (extract(day from max_call_dt)-1) -- adjustst if 31 days pushes month back to prior month
+else max_call_dt - interval '31' day
+end
+else add_months(max_call_dt,-1) 
+end as max_trans_31day
+,max_trans_31day - (extract(day from max_trans_31day)-1) as min_trans_31day
+,add_months(day31_mtd,-1) as day62_mtd
+,case
+when extract(month from day62_mtd)=extract(month from add_months(max_call_dt,-1)) then 
+case 
+when extract(month from (max_call_dt - interval '62' day)) = extract(month from add_months(day62_mtd,-2)) then max_call_dt - (extract(day from add_months(max_call_dt,-1))-1) -- adjustst if 31 days pushes month back to prior month
+else max_call_dt - interval '62' day
+end
+else add_months(max_call_dt,-2) 
+end as max_trans_62day
+,max_trans_62day - (extract(day from max_trans_62day)-1) as min_trans_62day
+
+from sys_calendar.calendar
+where calendar_date = date
+qualify row_number() over (partition by day31_mtd order by max_call_dt desc)=1
+
+) with data
+primary index(max_call_dt)
+on commit preserve rows;
+/***************************************************************************************************************************************/
+-----------------------------------------------  Final NDCIR Reporting/ last mod by EMH 07/22/15  ---------------------------------------------
+/***************************************************************************************************************************************/
+
+delete from ntl_prd_qmtbls.ndcir_line_detail_v
+where exists (sel 1 from ntl_prd_qmtbls.ndcir_dts
+    where  ntl_prd_qmtbls.ndcir_line_detail_v.trans_pymnt_dt between ntl_prd_qmtbls.ndcir_dts.activity_start and ntl_prd_qmtbls.ndcir_dts.activity_end);
+/***************************************************************************************************************************************/
+
+ins into ntl_prd_qmtbls.ndcir_line_detail_v
+Select
+acct.activity_type as trans_activity_type
+,acct.rpt_mth as trans_mth
+,acct.pymnt_dt as trans_pymnt_dt
+,coalesce(acct.pymnt_tm, cast(acct.pymnt_ts as time)) as trans_pymnt_tm
+,acct.pymnt_ts as trans_pymnt_ts
+/*Customer Information*/
+,acct.cust_area_desc
+,acct.cust_region_desc
+/********************************************************************************************/
+,acct.cust_vz_mkt_desc  ---This is for the new Market Desc /Mod EMH 11/11/15
+,acct.cust_vz_mkt_cd   ---This is the new Market code/Mod EMH 11/11/15
+/********************************************************************************************/
+,acct.mkt_cd
+,acct.sor_id
+,acct.cust_id
+,acct.cust_line_seq_id
+,acct.acct_num
+,coalesce(acct.vsn_cust_type_cd, 'no_data') as vision_cust_type_cd
+,coalesce(acct.cust_type_cd, 'no_data') as cust_type_cd
+,acct.lang_pref_ind   ---This is a new add. Was not included on the original buildout/ Mod EMH 11/01
+,acct.line_type  
+,acct.trans_type
+,coalesce(tie.trade_in_ind, acct.tradein_ind, 'N') as trade_in_ind
+,acct.sls_prsn_id
+,acct.credit_app_num
+,acct.fin_upg_flag
+/*New Data for POS*/
+,acct.invc_dt
+,acct.invc_line_num
+,acct.invc_num
+,acct.item_cd
+,acct.item_type
+,acct.sold_qty_sum
+,acct.pos_managed_ind
+,acct.pos_prepaid_ind
+,acct.pos_src_id
+,acct.pplan_cd
+,acct.pplan_mkt_cd
+,acct.row_type
+/*New Data for buddy Accts */
+,coalesce(acct.buddy_upgrade_ind, 'NA') as buddy_upgrade_ind
+,coalesce(acct.buddy_up_mtn, 'NA') as buddy_up_mtn
+,coalesce(acct.buddy_up_cust_id, 'NA') as buddy_up_cust_id
+,coalesce(acct.buddy_up_seq_id, 'NA') as buddy_up_seq_id
+,coalesce(acct.buddy_up_orig_acct, 'NA') as buddy_up_orig_acct
+/*New Device Information*/
+,coalesce(acct.prod_nm, 'NA') as prod_nm
+,coalesce(acct.esn_num, 'NA') as esn_num
+,coalesce(acct.prod_tier, 'NA') as prod_tier
+,coalesce(acct.os_type, 'NA') as os_type
+,coalesce(acct.os_version, 'NA') as os_version
+,coalesce(acct.eqp_mode, 'NA') as eqp_mode
+,coalesce(acct.device_generation, 'NA') as device_generation
+,coalesce(acct.handset_tier, 'NA') as handset_tier
+,coalesce(acct.mfg_nm, 'NA') as mfg_nm
+,acct.prod_eff_dt
+/*Prevous Equipment information*/
+,coalesce(acct.prod_nm_prev, 'NA') as prod_nm_prev
+,coalesce(acct.esn_num_prev, 'NA') as esn_num_prev
+,coalesce(acct.prod_tier_prev, 'NA') as prod_tier_prev
+,coalesce(acct.os_type_prev, 'NA') as os_type_prev
+,coalesce(acct.os_version_prev, 'NA') as os_version_prev
+,coalesce(acct.eqp_mode_prev, 'NA') as eqp_mode_prev
+,coalesce(acct.device_generation_prev, 'NA') as device_generation_prev
+,coalesce(acct.handset_tier_prev, 'NA') as handset_tier_prev
+,coalesce(acct.mfg_nm_prev, 'NA') as mfg_nm_prev
+,acct.prod_eff_dt_prev
+/*Channel Information*/
+,acct.fulfillment_indicator
+,acct.fulfillment_id
+/********************************************************************************************/
+---The fields have been updated to incorporate changes made for NonComm-CS/ Mod by EMH 11/05
+,coalesce(ncc.sls_area_desc, acct.sls_area_desc) as sls_area_desc
+,coalesce(ncc.sls_region_desc, acct.sls_region_desc) as sls_region_desc
+/********************************************************************************************/
+,coalesce(acct.sls_vz_mkt_desc, m.vz_mkt_desc) as sls_vz_mkt_desc  ---This is for the new Market Desc /Mod EMH 11/17/15
+,coalesce(acct.sls_vz_mkt_cd, m.vz_mkt_cd) as sls_vz_mkt_cd   ---This is the new Market code/Mod EMH 11/17/15
+/********************************************************************************************/
+,coalesce(ncc.sls_dist_chnl_churn_ctgry, acct.sls_dist_chnl_churn_ctgry) as sls_dist_chnl_churn_ctgry
+,case when ncc.cust_id is not null then 'NCC' else acct.sls_dist_chnl_type_cd end as sls_dist_chnl_type_cd
+,coalesce(ncc.trans_sls_outlet_id, acct.trans_sls_outlet_id) as trans_sls_outlet_id
+,coalesce(ncc.sls_outlet_nm,acct.sls_outlet_nm) as sls_outlet_nm
+,coalesce(ncc.hr_emp_id, acct.hr_emp_id) as hr_emp_id
+,coalesce(ncc.acss_netace_user_id, acct.acss_netace_user_id) as acss_netace_user_id
+,coalesce(ncc.sls_address_line,acct.sls_address_line) as sls_address_line
+,coalesce(ncc.sls_city_nm, acct.sls_city_nm) as sls_city_nm   ---  Updated to capture missing sales city names/ Mod EMH 11/11/15
+,coalesce(ncc.sls_state_cd, acct.sls_state_cd) as sls_state_cd
+/********************************************************************************************/
+/*Additional channel information*/
+,acct.master_agent_area_cd
+,acct.sls_outlet_mkt_cd
+,acct.master_agent_id
+,acct.master_agent_desc
+,acct.district_cd
+,acct.master_loc_cd
+,acct.premium_agent_ind
+,acct.agent_status_ind
+,acct.agent_type
+,acct.excl_indirect_desc
+,acct.sls_zip5_cd
+,acct.dept_id
+--,acct.deptgroup
+,case when ncc.sls_dist_chnl_churn_ctgry = 'NonComm-CS' and  acct.deptgroup = 'Other' 
+and coalesce(ncc.dept_fctn_desc_new, acct.dept_fctn_desc) = 'Vendor Customer Care' 
+Then 'Vendor Care' else acct.deptgroup end as deptgroup
+,acct.bus_unit_id
+,acct.bus_unit_desc
+,acct.dept_desc
+,coalesce(ncc.dept_fctn_desc_new, acct.dept_fctn_desc) as dept_fctn_desc   ---Removed User_Class_Comm and replaced with Dept function/ Mod EMH 11/01
+/*ECPD information if on the account*/
+,acct.ecpd_profile_id
+,acct.ecpd_liability_type_cd
+/*Call information if there was any*/
+,ndc.ts_ESTAdjusted
+,ndc.acss_ts_ESTAdjusted
+,ndc.acss_call_dt
+,ndc.acss_call_tm
+,ndc.acss_call_id
+,ndc.acd_call_id
+,ndc.ivr_call_id
+,ndc.acss_user_id
+,ndc.acss_call_ctr_desc  ----Added by EMH on 07/22/15
+,ndc.acss_call_ctr_cd
+,ndc.acss_call_ctr_type
+,ndc.acss_dept_id
+,ndc.call_start_tm
+,ndc.call_end_tm
+,ndc.call_period
+,ndc.acss_call_type_cd
+,ndc.calls0to2
+,ndc.calls0to7
+,ndc.calls0to31
+,ndc.calls0to62
+,ndc.instance_ind
+,acct.mtn
+,acct.activation_flag
+,acct.acq_ret_ind
+,case when acct.pymnt_dt between d.min_trans_3day and d.max_trans_3day then 'Y' else 'N' end as mtd0_2
+,case when acct.pymnt_dt between d.min_trans_7day and d.max_trans_7day then 'Y' else 'N' end as mtd0_7
+,case when acct.pymnt_dt between d.min_trans_31day and d.max_trans_31day then 'Y' else 'N' end as mtd0_31
+,case when acct.pymnt_dt between d.min_trans_62day and d.max_trans_62day then 'Y' else 'N' end as mtd0_62
+,ndc.acss_remarks_tm_trans  ----Last mod was created/validated by MRS 07/2015
+,ndc.acss_remarks_tm_call  ----Last mod was created/validated by MRS 07/2015
+
+from ntl_prd_qmtbls.ndcir_base_table as acct
+
+/********************************************************************************************/
+---Through validaton found that over 11% of the new Market desc was missing. This reduces that to 0.0001%/Mod Update by EMH 11/17/15
+left join ntl_prd_allvm.market_hist_v as m
+on acct.sls_outlet_mkt_cd=m.mkt_cd
+and acct.sor_id=m.sor_id
+and acct.pymnt_dt between m.eff_dt and coalesce(m.exp_dt, date) 
+/********************************************************************************************/
+
+left join NonCommCsNc as ncc /**** This table was created to seperated Care NonComm from the rest of the NonComm group ***/
+on acct.pymnt_dt = ncc.pymnt_dt
+and acct.cust_id = ncc.cust_id
+and acct.cust_line_seq_id = ncc.cust_line_seq_id
+and acct.acss_netace_user_id = ncc.acss_netace_user_id
+
+left join Trade_in_emh_v as tie
+on acct.cust_id = tie.cust_id
+and acct.cust_line_seq_id = tie.cust_line_seq_id
+and acct.rpt_mth = tie.rpt_mth /** This is creating the join in the data to make sure it is in the same calendar month**/
+and tie.min_trade_in_dt <= acct.pymnt_dt /**  This makes sure that the trade in date is not greater than the activity date **/
+
+left join ndcir_calls_tz as ndc
+on acct.cust_id=ndc.cust_id
+and acct.cust_line_seq_Id=ndc.cust_line_seq_Id
+and ndc.acss_call_dt between acct.pymnt_dt and acct.pymnt_dt + 62
+
+cross join dts as d;
+
+collect stats on ntl_prd_qmtbls.ndcir_line_detail_v index(trans_mth ,trans_pymnt_dt ,cust_id, cust_line_seq_id);
+collect stats column(trans_mth)  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(trans_pymnt_dt)  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( sls_dist_chnl_churn_ctgry)  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( cust_area_desc)  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( cust_region_desc)  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( trans_sls_outlet_id )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( sls_prsn_id)  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( prod_nm )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( fulfillment_indicator )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( hr_emp_id )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( acss_netace_user_id)  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( sls_area_desc )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( sls_region_desc )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( ECPD_PROFILE_ID )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( ECPD_LIABILITY_TYPE_CD )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( LANG_PREF_IND )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( ACSS_CALL_ID )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( ACSS_CALL_CTR_CD )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( ACSS_CALL_CTR_TYPE )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( ACSS_DEPT_ID )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( ACSS_CALL_TYPE_CD )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(prod_nm_prev) on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( mkt_cd )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column( sls_dist_chnl_type_cd  )  on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(activation_flag) on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(mtd0_2) on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(mtd0_7) on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(mtd0_31) on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(mtd0_62) on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(trade_in_ind) on ntl_prd_qmtbls.ndcir_line_detail_v;
+collect stats column(cust_vz_mkt_cd) on ntl_prd_qmtbls.ndcir_line_detail_v;  -- Added in for the new Market cd/Mod EMH
+collect stats column(cust_vz_mkt_desc) on ntl_prd_qmtbls.ndcir_line_detail_v;  -- Added in for the new Market cd/Mod EMH
+collect stats column(sls_vz_mkt_cd) on ntl_prd_qmtbls.ndcir_line_detail_v;  -- Added in for the new Market cd/Mod EMH
+collect stats column(sls_vz_mkt_desc) on ntl_prd_qmtbls.ndcir_line_detail_v;  -- Added in for the new Market cd/Mod EMH
+/***************************************************************************************************************************************/
+----This cleans up the last of the volatile table in the reporting
+
+drop table Trade_in_emh_v;
+drop table NonCommCsNc;
+drop table ndcir_calls_tz;
+drop table dts;
+/***************************************************************************************************************************************/
+----(Grant access to all participants)
+
+grant sel on ntl_prd_qmtbls.ndcir_line_detail_v to public;
+/***************************************************************************************************************************************/
+
+
+
+
+
+
+ 
+
+
+
+
+
